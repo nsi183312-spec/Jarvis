@@ -1,0 +1,6 @@
+{
+  "name": "JARVIS AI - Android Voice Assistant",
+  "description": "Futuristic cute female Indian AI voice assistant with animated 3D avatar, Hindi/English/Hinglish speech, device controls, and complete Android Kotlin/Compose project.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

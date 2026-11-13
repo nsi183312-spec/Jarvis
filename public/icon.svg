@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <radialGradient id="bgGrad" cx="50%" cy="42%" r="65%">
+      <stop offset="0%" stop-color="#111c44" />
+      <stop offset="55%" stop-color="#070d24" />
+      <stop offset="100%" stop-color="#050816" />
+    </radialGradient>
+    <linearGradient id="neonGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#22d3ee" />
+      <stop offset="50%" stop-color="#3b82f6" />
+      <stop offset="100%" stop-color="#c084fc" />
+    </linearGradient>
+    <linearGradient id="crownGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#fcd34d" />
+      <stop offset="100%" stop-color="#f59e0b" />
+    </linearGradient>
+    <filter id="glow" x="-25%" y="-25%" width="150%" height="150%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Rounded App Tile Background -->
+  <rect width="512" height="512" rx="112" fill="url(#bgGrad)" />
+
+  <!-- Outer Holographic HUD Rings -->
+  <circle cx="256" cy="256" r="196" fill="none" stroke="url(#neonGrad)" stroke-width="6" stroke-dasharray="48 16 14 16" opacity="0.75" />
+  <circle cx="256" cy="256" r="168" fill="none" stroke="#22d3ee" stroke-width="3" opacity="0.4" />
+  <circle cx="256" cy="256" r="146" fill="#09122e" stroke="url(#neonGrad)" stroke-width="8" filter="url(#glow)" />
+
+  <!-- Cute Royal Crown Accent -->
+  <path d="M214 152 L226 122 L256 138 L286 122 L298 152 Z" fill="url(#crownGrad)" filter="url(#glow)" />
+  <circle cx="226" cy="118" r="5" fill="#fde68a" />
+  <circle cx="256" cy="112" r="6" fill="#fde68a" />
+  <circle cx="286" cy="118" r="5" fill="#fde68a" />
+
+  <!-- Central Glowing Voice Microphone & Soundwave Emblem -->
+  <rect x="230" y="182" width="52" height="92" rx="26" fill="url(#neonGrad)" filter="url(#glow)" />
+  <path d="M202 252 C202 284 226 308 256 308 C286 308 310 284 310 252" fill="none" stroke="#38bdf8" stroke-width="11" stroke-linecap="round" filter="url(#glow)" />
+  <line x1="256" y1="308" x2="256" y2="344" stroke="#38bdf8" stroke-width="11" stroke-linecap="round" />
+  <line x1="224" y1="344" x2="288" y2="344" stroke="url(#neonGrad)" stroke-width="11" stroke-linecap="round" />
+
+  <!-- Left & Right Voice Waveform Bars -->
+  <rect x="150" y="232" width="12" height="48" rx="6" fill="#22d3ee" opacity="0.85" />
+  <rect x="172" y="212" width="12" height="88" rx="6" fill="#38bdf8" opacity="0.95" />
+  <rect x="328" y="212" width="12" height="88" rx="6" fill="#a855f7" opacity="0.95" />
+  <rect x="350" y="232" width="12" height="48" rx="6" fill="#c084fc" opacity="0.85" />
+
+  <!-- Subtle "J" Sparkle Dot -->
+  <circle cx="378" cy="138" r="7" fill="#22d3ee" opacity="0.9" />
+  <circle cx="134" cy="368" r="6" fill="#c084fc" opacity="0.85" />
+</svg>
