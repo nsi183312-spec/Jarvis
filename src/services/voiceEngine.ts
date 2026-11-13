@@ -429,8 +429,11 @@ export class VoiceEngine {
             );
             return;
           }
-          this.onStatusDetailCallback('Web Speech blocked — switching to HD Audio Recorder...');
-          this.startAudioRecorderListening(this.activeLang);
+          this.onErrorCallback(
+            errCode === 'service-not-allowed'
+              ? 'service-not-allowed'
+              : 'Mic voice recognition is iframe me blocked hai — "Open in Browser" par kholein ya neeche command type karein.'
+          );
           return;
         }
 
@@ -635,55 +638,11 @@ export class VoiceEngine {
     }
   }
 
-  private async transcribeRecordedAudio(blob: Blob, mimeType: string) {
-    if (typeof navigator !== 'undefined' && !navigator.onLine) {
-      this.onStateChange('idle');
-      this.onErrorCallback(
-        'Offline mode me HD Audio transcription unavailable hai. Neeche text/command buttons use karein.'
-      );
-      return;
-    }
-
-    try {
-      this.onStatusDetailCallback('Awaaz process ho rahi hai...');
-      const base64 = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          const result = reader.result as string;
-          const idx = result.indexOf(',');
-          resolve(idx >= 0 ? result.slice(idx + 1) : result);
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-      });
-
-      const resp = await fetch('/api/transcribe', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          audioBase64: base64,
-          mimeType,
-          language: this.activeLang,
-        }),
-      });
-
-      if (!resp.ok) {
-        const data = await resp.json().catch(() => ({}));
-        this.onErrorCallback(
-          data.error || 'Voice transcription requires Web Speech browser support or an active Gemini API key.'
-        );
-        return;
-      }
-
-      const data = await resp.json();
-      if (data.transcript && data.transcript.trim()) {
-        this.onResultCallback(data.transcript.trim(), true);
-      } else {
-        this.onErrorCallback('Kuch sunai nahi diya, kripya phir se bolein.');
-      }
-    } catch {
-      this.onErrorCallback('Audio process karne me error aaya.');
-    }
+  private async transcribeRecordedAudio(_blob: Blob, _mimeType: string) {
+    this.onStateChange('idle');
+    this.onErrorCallback(
+      'Voice recognition is browser/iframe me available nahi hai. Kripya "Open in Browser" par click karein ya neeche command likhein.'
+    );
   }
 
   public setCallbacks(callbacks: {
@@ -718,7 +677,10 @@ export class VoiceEngine {
     this.noSpeechRestartCount = 0;
 
     if (forceRecorderMode || !this.isSpeechRecognitionSupported()) {
-      this.startAudioRecorderListening(this.activeLang);
+      this.onStateChange('idle');
+      this.onErrorCallback(
+        'Is browser me Web Speech Recognition available nahi hai. Kripya Chrome browser me "Open in Browser" se kholein ya neeche command type karein.'
+      );
       return;
     }
 
@@ -726,7 +688,10 @@ export class VoiceEngine {
     this.createFreshRecognitionInstance();
 
     if (!this.recognition) {
-      this.startAudioRecorderListening(this.activeLang);
+      this.onStateChange('idle');
+      this.onErrorCallback(
+        'Speech Recognition start nahi ho saka. Kripya neeche command type karein.'
+      );
       return;
     }
 

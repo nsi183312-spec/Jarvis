@@ -1215,12 +1215,16 @@ export class CommandRouter {
       };
     }
 
-    // Music Playback Controls (Play, Pause, Next, Previous, Search Song)
+    // Music / Song / Video Playback Controls (Play, Pause, Next, Previous, Search Song)
     if (
       query.includes('music') ||
       query.includes('song') ||
       query.includes('gana') ||
-      query.includes('spotify')
+      query.includes('gaana') ||
+      query.includes('spotify') ||
+      query.startsWith('play ') ||
+      query.startsWith('bajao ') ||
+      query.startsWith('sunao ')
     ) {
       if (query.includes('next') || query.includes('agla')) {
         this.triggerAndroidBridge('music_next');
@@ -1246,27 +1250,33 @@ export class CommandRouter {
           actionType: 'music_pause',
         };
       }
-      if (query.includes('play') || query.includes('chalao') || query.includes('search') || query.includes('sunao')) {
+      if (
+        query.includes('play') ||
+        query.includes('chalao') ||
+        query.includes('bajao') ||
+        query.includes('search') ||
+        query.includes('sunao')
+      ) {
         const song =
           this.extractQueryAfterKeywords(
             query,
-            /\b(spotify|music|par|me|play|chalao|search|sunao|song|gaana|gana|karo)\b/gi
+            /\b(spotify|music|par|me|play|chalao|bajao|search|sunao|song|songs|gaana|gana|karo)\b/gi
           ) || 'top hindi hits';
         const isSpotify = query.includes('spotify');
         const url = isSpotify
           ? `https://open.spotify.com/search/${encodeURIComponent(song)}`
-          : `https://music.youtube.com/search?q=${encodeURIComponent(song)}`;
-        const bridged = this.triggerAndroidBridge('open_url', url);
+          : `https://www.youtube.com/results?search_query=${encodeURIComponent(song)}`;
+        const bridged = this.triggerAndroidBridge(isSpotify ? 'open_url' : 'youtube_play', isSpotify ? url : song);
         return {
           handled: true,
-          reply: `${isSpotify ? 'Spotify' : 'Music'} app me "${song}" play kar rahi hoon!`,
+          reply: `${isSpotify ? 'Spotify' : 'YouTube'} app me "${song}" direct play kar rahi hoon!`,
           actionType: 'music_play',
           externalUrl: bridged
             ? undefined
             : isSpotify
             ? this.buildDeepIntentUrl(url, 'com.spotify.music', `spotify://search/${encodeURIComponent(song)}`)
-            : this.buildDeepIntentUrl(url, 'com.google.android.apps.youtube.music'),
-          externalLabel: isSpotify ? 'Open Spotify App' : 'Open Music App',
+            : this.buildDeepIntentUrl(url, 'com.google.android.youtube'),
+          externalLabel: isSpotify ? 'Open Spotify App' : 'Open YouTube App',
         };
       }
     }
@@ -1594,57 +1604,62 @@ export class CommandRouter {
       };
     }
 
-    // 9. CALLS & SMS / MESSAGES (Safety confirmation dialog required)
-    if (query.startsWith('call ') || query.startsWith('phone lagao ') || query.includes('ko call karo')) {
+    // 9. DIRECT CALLS & SMS / MESSAGES (Executes immediately without extra confirmation popup)
+    if (
+      query.startsWith('call ') ||
+      query.startsWith('phone lagao ') ||
+      query.startsWith('dial ') ||
+      query.includes('ko call karo') ||
+      query.includes('ko call lagao') ||
+      query.includes('ko phone lagao')
+    ) {
       const target = query
-        .replace(/^(call|phone lagao)\s+/i, '')
-        .replace(/\s*ko call karo$/i, '')
+        .replace(/^(call|phone lagao|dial)\s+/i, '')
+        .replace(/\s*ko (call karo|call lagao|phone lagao|call|phone)$/i, '')
         .trim();
       const digitsOnly = target.replace(/[^\d+]/g, '');
+      const dialTarget = digitsOnly || target;
+      const bridged = this.triggerAndroidBridge('call', dialTarget);
+      const telUrl = bridged ? undefined : `tel:${encodeURIComponent(dialTarget)}`;
       return {
         handled: true,
-        reply: `Kya aap sachme ${target} ko phone lagana chahte hain? Confirm kijiye.`,
-        actionType: 'request_call_confirmation',
-        requiresConfirmation: true,
-        confirmationDetails: {
-          action: 'Call Phone Contact',
-          target: target,
-          onConfirm: () => {
-            const bridged = this.triggerAndroidBridge('call', digitsOnly || target);
-            if (!bridged && typeof window !== 'undefined') {
-              window.location.href = `tel:${encodeURIComponent(digitsOnly || target)}`;
-            }
-          },
-        },
+        reply: `${target} ko direct call laga rahi hoon!`,
+        actionType: 'direct_call',
+        externalUrl: telUrl,
+        externalLabel: `Call ${target}`,
       };
     }
 
-    if (query.startsWith('sms ') || query.startsWith('message bhejo ') || query.includes('ko message bhejo')) {
+    if (
+      query.startsWith('sms ') ||
+      query.startsWith('message bhejo ') ||
+      query.startsWith('send sms ') ||
+      query.includes('ko message bhejo') ||
+      query.includes('ko sms bhejo')
+    ) {
       const target = query
-        .replace(/^(sms|message bhejo)\s+/i, '')
-        .replace(/\s*ko message bhejo$/i, '')
+        .replace(/^(sms|message bhejo|send sms)\s+/i, '')
+        .replace(/\s*ko (message bhejo|sms bhejo)$/i, '')
         .trim();
+      const bridged = this.triggerAndroidBridge('sms', target);
+      const digitsOnly = target.replace(/[^\d+]/g, '');
+      const smsUrl = bridged
+        ? undefined
+        : digitsOnly
+        ? `sms:${encodeURIComponent(digitsOnly)}`
+        : `sms:?body=${encodeURIComponent(target)}`;
       return {
         handled: true,
-        reply: `Kya aap ${target} ko SMS bhejna chahte hain? Kripya confirm karein.`,
-        actionType: 'request_sms_confirmation',
-        requiresConfirmation: true,
-        confirmationDetails: {
-          action: 'Send SMS Message',
-          target: target,
-          onConfirm: () => {
-            const bridged = this.triggerAndroidBridge('sms', target);
-            if (!bridged && typeof window !== 'undefined') {
-              window.location.href = `sms:?body=${encodeURIComponent(`Hello ${target}`)}`;
-            }
-          },
-        },
+        reply: `${target} ko direct SMS open kar rahi hoon!`,
+        actionType: 'direct_sms',
+        externalUrl: smsUrl,
+        externalLabel: `Message ${target}`,
       };
     }
 
     // 10. UNIVERSAL PHONE APP LAUNCHER (Custom apps + all 34+ built-in apps + Android intent://)
     const isLaunchIntent =
-      /\b(open|kholo|launch|start|khol|dikhao|chalu)\b/.test(query) ||
+      /\b(open|kholo|kholiye|khole|launch|start|khol|dikhao|dikhaiye|chalu|chalao|chalaiye|lagao|nikalo|bajao)\b/.test(query) ||
       query.includes('chalu karo') ||
       query.includes('khol do') ||
       query.includes('open karo');
@@ -1782,7 +1797,7 @@ export class CommandRouter {
       };
     }
 
-    // Pass to Gemini AI Brain
+    // Pass to Local Smart Brain
     return {
       handled: false,
       reply: '',

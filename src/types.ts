@@ -52,6 +52,7 @@ export interface VoiceSettings {
   preferredLanguage: 'auto' | 'hi-IN' | 'en-IN' | 'en-US';
   useCloudVoice?: boolean; // Use ElevenLabs HD Neural Voice via server proxy
   elevenLabsVoiceId?: string; // Selected ElevenLabs voice ID
+  aiModel?: string; // Selected Ollama Cloud model ID
 }
 
 export interface DeviceState {

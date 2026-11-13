@@ -25,6 +25,9 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [cloudVoices, setCloudVoices] = useState<CloudVoiceItem[]>([]);
   const [verifiedIndianFemale, setVerifiedIndianFemale] = useState<boolean>(false);
+  const [aiModels, setAiModels] = useState<Array<{ name: string; capabilities?: string[] }>>([]);
+  const [aiConfigured, setAiConfigured] = useState<boolean>(false);
+  const [activeServerModel, setActiveServerModel] = useState<string>('glm-5.3-flash');
 
   useEffect(() => {
     const updateVoiceList = () => {
@@ -44,6 +47,19 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         setCloudVoices(res.voices);
       }
     });
+
+    fetch('/api/ai/models')
+      .then((r) => r.json())
+      .then((data) => {
+        setAiConfigured(Boolean(data?.configured));
+        if (data?.activeModel) setActiveServerModel(data.activeModel);
+        if (Array.isArray(data?.models)) {
+          setAiModels(data.models);
+        }
+      })
+      .catch(() => {
+        // offline
+      });
   }, []);
 
   return (
@@ -54,28 +70,50 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       {/* Live Mic Connectivity Debugger */}
       <MicDiagnosticPanel onUseRecorderMode={onStartRecorderMode} />
 
-      {/* Gemini AI Brain Status & Billing Card */}
-      <div className="p-4 rounded-2xl bg-gradient-to-r from-cyan-950/40 via-blue-950/30 to-slate-900/40 border border-cyan-500/30 flex items-start gap-3">
-        <div className="p-2 rounded-xl bg-cyan-500/20 text-cyan-300 mt-0.5">
-          <Shield className="w-5 h-5" />
-        </div>
-        <div className="text-xs">
-          <h3 className="font-semibold text-sm text-cyan-200">
-            Gemini AI Cloud Brain &amp; Live Voice Engine
-          </h3>
-          <p className="text-slate-300 mt-1">
-            JARVIS uses <strong className="text-cyan-200">Gemini 4 Hydrogen</strong> for Q&amp;A, <strong className="text-cyan-200">Gemini 3.8 Live</strong> for real-time voice conversations, and <strong className="text-cyan-200">Gemini 3.8 TTS</strong> for natural speech.
-          </p>
-          <div className="mt-2.5 p-2.5 rounded-xl bg-slate-950/80 border border-slate-800 text-[11px] text-slate-300">
-            <span className="font-semibold text-cyan-300 block mb-0.5">Tip for Cloud AI Generation:</span>
-            Ensure your billing-enabled <strong className="text-white">GEMINI_API_KEY</strong> is selected in AI Studio&apos;s <strong className="text-white">Settings &gt; Secrets</strong> panel so Live Voice, TTS, and Q&amp;A respond without 403 limits.
+      {/* Smart Assistant Brain & Voice Status Card */}
+      <div className="p-4 rounded-2xl bg-gradient-to-r from-cyan-950/40 via-blue-950/30 to-slate-900/40 border border-cyan-500/30 space-y-3">
+        <div className="flex items-start gap-3">
+          <div className="p-2 rounded-xl bg-cyan-500/20 text-cyan-300 mt-0.5">
+            <Shield className="w-5 h-5" />
           </div>
-          {!verifiedIndianFemale && voices.length > 0 && (
-            <p className="text-[10px] text-amber-300/90 mt-2">
-              Note: System default voices active (hi-IN/en-IN female pack may require device TTS download).
+          <div className="text-xs flex-1">
+            <h3 className="font-semibold text-sm text-cyan-200">
+              Ollama Cloud AI Brain &amp; ElevenLabs Voice
+            </h3>
+            <p className="text-slate-300 mt-1">
+              {aiConfigured
+                ? `Ollama Cloud API active hai (${aiModels.length || 24} models reachable) with ElevenLabs HD Voice aur Local Smart fallback.`
+                : 'JARVIS uses direct Android intent routing, offline math/smart replies, and ElevenLabs HD Neural Voice.'}
             </p>
-          )}
+            {!verifiedIndianFemale && voices.length > 0 && (
+              <p className="text-[10px] text-amber-300/90 mt-2">
+                Note: System default voices active (hi-IN/en-IN female pack may require device TTS download).
+              </p>
+            )}
+          </div>
         </div>
+
+        {aiModels.length > 0 && (
+          <div>
+            <label className="text-[11px] text-slate-300 block mb-1">
+              Ollama Cloud Model
+            </label>
+            <select
+              value={settings.aiModel || activeServerModel}
+              onChange={(e) => onUpdateSettings({ aiModel: e.target.value })}
+              className="w-full bg-slate-900 text-xs text-white px-3 py-2 rounded-xl border border-cyan-500/40 focus:outline-none focus:border-cyan-400"
+            >
+              {aiModels.map((m) => (
+                <option key={m.name} value={m.name}>
+                  {m.name}
+                  {m.capabilities && m.capabilities.length > 0
+                    ? ` (${m.capabilities.slice(0, 3).join(', ')})`
+                    : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
       </div>
 
       {/* Voice Synthesizer Configuration */}
@@ -130,13 +168,9 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                   className="w-full bg-slate-900 text-xs text-white px-3 py-2 rounded-xl border border-cyan-500/40 focus:outline-none focus:border-cyan-400"
                 >
                   {cloudVoices.length === 0 ? (
-                    <>
-                      <option value="gemini:Kore">JARVIS Gemini Voice — Kore (Warm Female)</option>
-                      <option value="gemini:Zephyr">JARVIS Gemini Voice — Zephyr (Bright Female)</option>
-                      <option value="ihKwLOjVUMG4lgUI6meZ">
-                        Leo - Curious Character (ElevenLabs ID: ihKwLOjVUMG4lgUI6meZ)
-                      </option>
-                    </>
+                    <option value="ihKwLOjVUMG4lgUI6meZ">
+                      Leo - Curious Character (Custom ID: ihKwLOjVUMG4lgUI6meZ)
+                    </option>
                   ) : (
                     cloudVoices.map((cv) => (
                       <option key={cv.voice_id} value={cv.voice_id}>
@@ -159,7 +193,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                     type="text"
                     value={settings.elevenLabsVoiceId || 'ihKwLOjVUMG4lgUI6meZ'}
                     onChange={(e) => onUpdateSettings({ elevenLabsVoiceId: e.target.value.trim() })}
-                    placeholder="Enter Voice ID or gemini:Kore"
+                    placeholder="Enter ElevenLabs Voice ID..."
                     className="flex-1 bg-slate-950 text-xs text-cyan-200 px-3 py-1.5 rounded-xl border border-slate-700 focus:outline-none focus:border-cyan-400 font-mono"
                   />
                   <button
@@ -170,9 +204,11 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                     Test ID
                   </button>
                 </div>
-                <p className="text-[10px] text-slate-400 mt-1.5 leading-relaxed">
-                  Server automatically uses <strong className="text-cyan-300">Gemini 3.8 TTS</strong> fallback whenever ElevenLabs is unavailable, or select a <code className="text-cyan-300">gemini:Kore</code> / <code className="text-cyan-300">gemini:Zephyr</code> voice directly.
-                </p>
+                {(settings.elevenLabsVoiceId || 'ihKwLOjVUMG4lgUI6meZ') === 'ihKwLOjVUMG4lgUI6meZ' && (
+                  <p className="text-[10px] text-amber-300/90 mt-1.5 leading-relaxed">
+                    Note: Voice ID <code>ihKwLOjVUMG4lgUI6meZ</code> (Leo - Curious Character) ek ElevenLabs Library Voice hai. Free API plan par ElevenLabs library voices block hone par server automatically HD Neural fallback (Jessica) play karta hai taaki JARVIS silent na ho; plan upgrade hote hi ye ID direct chalegi.
+                  </p>
+                )}
               </div>
             </div>
           )}

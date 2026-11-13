@@ -2,7 +2,6 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
-    alias(libs.plugins.google.services) // For Firebase AI Logic
 }
 
 android {
@@ -66,12 +65,6 @@ dependencies {
 
     // Coroutines & Concurrency
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
-
-    // Google Gen AI / Firebase AI Logic for Android
-    implementation("com.google.ai.client.generativeai:generativeai:0.9.0")
-    // Firebase BOM
-    implementation(platform("com.google.firebase:firebase-bom:33.4.0"))
-    implementation("com.google.firebase:firebase-analytics")
 
     // DataStore for Settings
     implementation("androidx.datastore:datastore-preferences:1.1.1")

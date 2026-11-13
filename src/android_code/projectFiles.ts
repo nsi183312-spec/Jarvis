@@ -179,7 +179,6 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.material.icons.extended)
     implementation("io.coil-kt:coil-compose:2.6.0")
-    implementation("com.google.ai.client.generativeai:generativeai:0.9.0")
     implementation("androidx.datastore:datastore-preferences:1.1.1")
 }`
   },
@@ -916,40 +915,39 @@ import android.app.Application
 class JarvisApplication : Application()`
   },
   {
-    path: 'app/src/main/java/com/jarvis/ai/ai/GeminiBrain.kt',
-    name: 'GeminiBrain.kt',
+    path: 'app/src/main/java/com/jarvis/ai/ai/LocalSmartBrain.kt',
+    name: 'LocalSmartBrain.kt',
     category: 'kotlin',
     language: 'kotlin',
-    description: 'Bilingual Gemini AI assistant brain with cute Hinglish/English persona.',
+    description: 'Bilingual local offline Smart Persona brain for instant Hindi/Hinglish/English replies without external AI APIs.',
     content: `package com.jarvis.ai.ai
 
-import com.google.ai.client.generativeai.GenerativeModel
-import com.google.ai.client.generativeai.type.content
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
-class GeminiBrain(private val apiKey: String) {
-    private val systemInstruction = """
-        You are JARVIS AI, a cute, intelligent, and friendly Indian female personal voice assistant.
-        You understand and speak Hindi, English, and Hinglish concisely in 1-3 sentences.
-    """.trimIndent()
-
-    private val model by lazy {
-        GenerativeModel(
-            modelName = "gemini-2.5-flash",
-            apiKey = apiKey,
-            systemInstruction = content { text(systemInstruction) }
-        )
-    }
-
-    suspend fun generateReply(prompt: String): String = withContext(Dispatchers.IO) {
-        if (apiKey.isBlank()) {
-            return@withContext "Ji! Maine aapki baat suni: " + prompt + ". Main JARVIS hamesha aapki seva ke liye ready hoon!"
-        }
-        try {
-            model.generateContent(prompt).text ?: "Ji, main sun rahi hoon!"
-        } catch (_: Exception) {
-            "Ji! Main aapki help ke liye ready hoon. Kripya agla command batayein!"
+class LocalSmartBrain {
+    fun generateReply(prompt: String): String {
+        val lower = prompt.lowercase(Locale.getDefault()).trim()
+        return when {
+            lower.contains("time") || lower.contains("samay") || lower.contains("baje") -> {
+                val now = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date())
+                "Abhi samay $now ho raha hai."
+            }
+            lower.contains("date") || lower.contains("tarikh") || lower.contains("aaj") -> {
+                val today = SimpleDateFormat("EEEE, dd MMM yyyy", Locale.getDefault()).format(Date())
+                "Aaj $today hai."
+            }
+            lower.contains("hello") || lower.contains("hi") || lower.contains("namaste") ->
+                "Namaste Lucky! Main JARVIS hoon, bataiye main aapki kya help kar sakti hoon?"
+            lower.contains("how are you") || lower.contains("kaise ho") || lower.contains("kaisi ho") ->
+                "Main bilkul theek hoon aur full speed me aapke commands execute karne ke liye ready hoon!"
+            lower.contains("who are you") || lower.contains("kaun ho") || lower.contains("tumhara naam") ->
+                "Main JARVIS AI hoon, aapki smart personal voice assistant."
+            lower.contains("thank") || lower.contains("shukriya") || lower.contains("dhanyawad") ->
+                "Aapka bahut shukriya! Koi aur kaam ho to seedhe boliye."
+            else ->
+                "Ji! Maine aapki baat suni: $prompt. Aap call, SMS, YouTube, WhatsApp, Wi-Fi ya calculator command seedhe bol sakte hain!"
         }
     }
 }`
@@ -965,7 +963,7 @@ class GeminiBrain(private val apiKey: String) {
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.jarvis.ai.ai.GeminiBrain
+import com.jarvis.ai.ai.LocalSmartBrain
 import com.jarvis.ai.router.CommandResult
 import com.jarvis.ai.router.CommandRouter
 import com.jarvis.ai.ui.AvatarMood
@@ -981,7 +979,7 @@ data class ChatMessage(val sender: String, val text: String)
 
 class JarvisViewModel(app: Application) : AndroidViewModel(app) {
     private val router = CommandRouter(app)
-    private val brain = GeminiBrain("")
+    private val brain = LocalSmartBrain()
     private var voiceEngine: VoiceEngine? = null
 
     private val _state = MutableStateFlow(AssistantState.IDLE)

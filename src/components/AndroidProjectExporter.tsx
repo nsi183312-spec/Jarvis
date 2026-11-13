@@ -58,7 +58,7 @@ Built with **Kotlin** and **Jetpack Compose**.
 Features:
 - Permanent Cute 3D Anime Girl Avatar with Mood States & Audio-Frequency Breathing
 - Sweet Indian Female Voice (Hindi 'hi-IN' & English 'en-IN')
-- Bilingual Gemini AI Brain + Offline Smart Persona
+- Offline Local Smart Persona & Direct Command Brain
 - Universal Android App Launcher for 26+ Phone Apps (vivo V-Appstore, vivo Cloud, MyJio, MovieBox+, Maps, Meet, WhatsApp, YouTube, etc.)
 - JarvisAccessibilityService for hands-free Global Navigation (Home, Back, Recents, Scroll, Click, Type)
 - Foreground Voice Service with persistent microphone notification

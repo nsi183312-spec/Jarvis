@@ -14,7 +14,6 @@ import {
 } from './types';
 import { THEMES } from './theme';
 import { voiceEngine } from './services/voiceEngine';
-import { geminiLiveClient } from './services/geminiLiveClient';
 import { commandRouter } from './services/commandRouter';
 import { generateOfflineSmartReply, tryEvaluateOfflineArithmetic } from './services/offlineBrain';
 import { useOnlineStatus } from './hooks/useOnlineStatus';
@@ -61,7 +60,6 @@ import {
   ExternalLink,
   X,
   Timer,
-  Radio,
 } from 'lucide-react';
 
 function isNativePhoneUri(url: string): boolean {
@@ -123,7 +121,6 @@ export default function App() {
   const [audioLevel, setAudioLevel] = useState<number>(0);
   const [textInput, setTextInput] = useState<string>('');
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
-  const [liveStatus, setLiveStatus] = useState<'disconnected' | 'connecting' | 'live'>('disconnected');
   const [micNotice, setMicNotice] = useState<string>('');
   const [micStatusDetail, setMicStatusDetail] = useState<string>('');
   const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
@@ -404,89 +401,6 @@ export default function App() {
         setMicStatusDetail(detail);
       },
     });
-
-    let lastLiveUserPrompt = '';
-    geminiLiveClient.setCallbacks({
-      onStatusChange: (status) => {
-        setLiveStatus(status);
-        if (status === 'connecting') {
-          setAssistantState('thinking');
-          setMicStatusDetail('Gemini Live Voice connect ho raha hai...');
-        } else if (status === 'live') {
-          setAssistantState('listening');
-          setMicNotice('');
-          setMicStatusDetail('Gemini Live Voice active — seedha baat karein');
-        } else {
-          setMicStatusDetail('');
-          if (!isProcessingRef.current) {
-            setAssistantState('idle');
-          }
-        }
-      },
-      onInputTranscript: (text) => {
-        lastLiveUserPrompt = text;
-        setCurrentSpokenText(text);
-      },
-      onOutputTranscript: (text, isFinal) => {
-        setAssistantState('speaking');
-        if (isFinal) {
-          setCurrentSpokenText('');
-          const spokenPrompt = lastLiveUserPrompt.trim();
-          lastLiveUserPrompt = '';
-
-          if (spokenPrompt) {
-            commandRouter.executeLocalCommand(spokenPrompt, deviceStateRef.current).then((res) => {
-              if (res.handled) {
-                if (res.deviceStateUpdate) {
-                  setDeviceState((prev) => ({ ...prev, ...res.deviceStateUpdate }));
-                }
-                if (res.externalUrl) {
-                  launchExternalUrlSafe(res.externalUrl);
-                }
-              }
-            });
-          }
-
-          setMessages((prev) => [
-            ...prev,
-            ...(spokenPrompt
-              ? [
-                  {
-                    id: 'msg_live_u_' + Date.now(),
-                    sender: 'user' as const,
-                    text: spokenPrompt,
-                    timestamp: new Date().toLocaleTimeString('en-IN', {
-                      hour: '2-digit',
-                      minute: '2-digit',
-                    }),
-                  },
-                ]
-              : []),
-            {
-              id: 'msg_live_j_' + (Date.now() + 1),
-              sender: 'jarvis' as const,
-              text,
-              timestamp: new Date().toLocaleTimeString('en-IN', {
-                hour: '2-digit',
-                minute: '2-digit',
-              }),
-              intent: 'ai_chat',
-            },
-          ]);
-          if (geminiLiveClient.isRunning()) {
-            setAssistantState('listening');
-          }
-        }
-      },
-      onAudioLevel: (level) => {
-        setAudioLevel(level);
-      },
-      onError: (msg) => {
-        setMicNotice(msg);
-        setLiveStatus('disconnected');
-        setAssistantState('idle');
-      },
-    });
   }, []);
 
   // Scroll chat to bottom
@@ -665,28 +579,25 @@ export default function App() {
           message: inputText,
           history: currentHistory.slice(-6),
           language: currentSettings.preferredLanguage,
+          model: currentSettings.aiModel,
         }),
       });
 
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        const apiErrorReply =
-          data?.reply ||
-          data?.error ||
-          `Server returned ${response.status}. Please check GEMINI_API_KEY in Settings > Secrets.`;
-        setAvatarMood('empathetic');
+        const fallback = generateOfflineSmartReply(inputText);
         setMessages((prev) => [
           ...prev,
           {
-            id: 'msg_err_' + Date.now(),
+            id: 'msg_local_' + Date.now(),
             sender: 'jarvis',
-            text: apiErrorReply,
+            text: fallback.reply,
             timestamp: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
-            intent: 'ai_chat',
+            intent: fallback.intent,
           },
         ]);
         if (currentSettings.autoSpeak) {
-          speakResponse(apiErrorReply);
+          speakResponse(fallback.reply);
           setAssistantState('speaking');
         } else {
           setAssistantState('idle');
@@ -694,10 +605,36 @@ export default function App() {
         return;
       }
 
-      const replyText =
+      let replyText =
         data.reply || 'Ji! Main aapki baat samajh gayi. Kripya batayein agla command kya hai?';
+      let actionUrl: string | undefined;
+      let actionLabel: string | undefined;
 
-      if (data.action && data.action.type === 'torch') {
+      if (typeof data.commandText === 'string' && data.commandText.trim()) {
+        const aiCmdResult = await commandRouter.executeLocalCommand(
+          data.commandText.trim(),
+          currentDevState
+        );
+        if (aiCmdResult.handled) {
+          if (aiCmdResult.deviceStateUpdate) {
+            setDeviceState((prev) => ({ ...prev, ...aiCmdResult.deviceStateUpdate }));
+          }
+          if (aiCmdResult.noteCreated) {
+            setNotes((prev) => [aiCmdResult.noteCreated!, ...prev]);
+          }
+          if (aiCmdResult.alarmCreated) {
+            setAlarms((prev) => [aiCmdResult.alarmCreated!, ...prev]);
+          }
+          if (aiCmdResult.externalUrl) {
+            launchExternalUrlSafe(aiCmdResult.externalUrl);
+            actionUrl = aiCmdResult.externalUrl;
+            actionLabel = aiCmdResult.externalLabel;
+          }
+          if (aiCmdResult.reply) {
+            replyText = aiCmdResult.reply;
+          }
+        }
+      } else if (data.action && data.action.type === 'torch') {
         await commandRouter.toggleFlashlight(data.action.value);
         setDeviceState((prev) => ({ ...prev, flashlight: data.action.value }));
       }
@@ -708,7 +645,9 @@ export default function App() {
         sender: 'jarvis',
         text: replyText,
         timestamp: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
-        intent: data.intent || 'ai_chat',
+        intent: actionUrl ? 'app_launch' : data.intent || 'ai_chat',
+        actionUrl,
+        actionLabel,
         detectedLanguage: data.detectedLanguage,
       };
       setMessages((prev) => [...prev, jarvisMsg]);
@@ -744,11 +683,6 @@ export default function App() {
   processInputRef.current = handleProcessVoiceInput;
 
   const handleToggleListening = () => {
-    if (geminiLiveClient.isRunning()) {
-      geminiLiveClient.stop();
-      setAssistantState('idle');
-      return;
-    }
     if (assistantState === 'listening') {
       const wasRecorder = voiceEngine.isAudioRecorderActive();
       voiceEngine.stopListening();
@@ -761,23 +695,6 @@ export default function App() {
         voiceSettings.preferredLanguage === 'en-IN' ? 'en-IN' : 'hi-IN'
       );
     }
-  };
-
-  const handleToggleGeminiLive = () => {
-    if (geminiLiveClient.isRunning() || liveStatus === 'connecting') {
-      geminiLiveClient.stop();
-      setAssistantState('idle');
-      return;
-    }
-    voiceEngine.stopListening(true);
-    voiceEngine.stopSpeaking();
-    setMicNotice('');
-    geminiLiveClient.start({
-      voiceId: voiceSettings.elevenLabsVoiceId?.startsWith('gemini:')
-        ? voiceSettings.elevenLabsVoiceId
-        : 'Kore',
-      language: voiceSettings.preferredLanguage,
-    });
   };
 
   const handleToggleFlashlight = async () => {
@@ -1148,14 +1065,10 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Tap to Speak Caption + Live Voice + Debug Mic */}
-                  <div className="flex flex-wrap items-center justify-center gap-2 text-xs sm:text-sm">
+                  {/* Tap to Speak Caption + Debug Mic */}
+                  <div className="flex items-center justify-center gap-2 text-xs sm:text-sm">
                     <span className="font-semibold text-white tracking-wide">
-                      {liveStatus === 'live'
-                        ? 'Gemini Live Active — Boliye'
-                        : liveStatus === 'connecting'
-                        ? 'Connecting Live Voice...'
-                        : assistantState === 'listening'
+                      {assistantState === 'listening'
                         ? micStatusDetail || 'Listening... Speak Now'
                         : assistantState === 'speaking'
                         ? 'Speaking... Tap Mic to Stop'
@@ -1163,19 +1076,6 @@ export default function App() {
                         ? 'Processing voice...'
                         : 'Tap to Speak'}
                     </span>
-                    <span className="text-slate-600">·</span>
-                    <button
-                      type="button"
-                      onClick={handleToggleGeminiLive}
-                      className={`inline-flex items-center gap-1 text-xs font-semibold transition ${
-                        liveStatus !== 'disconnected'
-                          ? 'text-emerald-300 hover:text-emerald-200'
-                          : 'text-cyan-300 hover:text-white'
-                      }`}
-                    >
-                      <Radio className={`w-3.5 h-3.5 ${liveStatus === 'live' ? 'animate-pulse' : ''}`} />
-                      <span>{liveStatus !== 'disconnected' ? 'Stop Live' : 'Gemini Live'}</span>
-                    </button>
                     <span className="text-slate-600">·</span>
                     <button
                       type="button"
