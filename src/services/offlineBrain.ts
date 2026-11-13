@@ -5,9 +5,78 @@ export interface OfflineBrainReply {
   detectedLanguage: string;
 }
 
+const DEVANAGARI_CONSONANTS: Record<string, string> = {
+  क: 'k', ख़: 'kh', ख: 'kh', ग: 'g', ग़: 'gh', घ: 'gh', ङ: 'ng',
+  च: 'ch', छ: 'chh', ज: 'j', ज़: 'z', झ: 'jh', ञ: 'ny',
+  ट: 't', ठ: 'th', ड: 'd', ड़: 'r', ढ: 'dh', ढ़: 'rh', ण: 'n',
+  त: 't', थ: 'th', द: 'd', ध: 'dh', न: 'n',
+  प: 'p', फ: 'f', फ़: 'f', ब: 'b', भ: 'bh', म: 'm',
+  य: 'y', र: 'r', ल: 'l', व: 'v', श: 'sh', ष: 'sh', स: 's', ह: 'h',
+  क्ष: 'ksh', त्र: 'tr', ज्ञ: 'gy',
+};
+
+const DEVANAGARI_INDEPENDENT_VOWELS: Record<string, string> = {
+  अ: 'a', आ: 'a', इ: 'i', ई: 'ee', उ: 'u', ऊ: 'oo', ऋ: 'ri',
+  ए: 'e', ऐ: 'ai', ओ: 'o', औ: 'au', ऑ: 'o',
+};
+
+const DEVANAGARI_MATRAS: Record<string, string> = {
+  'ा': 'a', 'ि': 'i', 'ी': 'ee', 'ु': 'u', 'ू': 'oo', 'ृ': 'ri',
+  'े': 'e', 'ै': 'ai', 'ो': 'o', 'ौ': 'au', 'ॉ': 'o',
+  'ं': 'n', 'ँ': 'n', 'ः': 'h', '्': '', '़': '',
+};
+
+/**
+ * Converts arbitrary Devanagari Hindi words (such as any installed third-party app name)
+ * into phonetic Latin characters so dynamic app matching works for every app, not just a hardcoded list.
+ */
+export function transliterateDevanagariToLatin(input: string): string {
+  if (!/[\u0900-\u097F]/.test(input)) return input;
+  let out = '';
+  const chars = Array.from(input);
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i];
+    const next = chars[i + 1];
+    const pair = next === '़' ? ch + next : '';
+
+    if (pair && DEVANAGARI_CONSONANTS[pair]) {
+      i++;
+      const after = chars[i + 1];
+      out += DEVANAGARI_CONSONANTS[pair];
+      if (!after || (!DEVANAGARI_MATRAS[after] && !DEVANAGARI_CONSONANTS[after] && after !== ' ')) {
+        // Keep implicit 'a' only inside words unless followed by halant or vowel matra
+      } else if (after && DEVANAGARI_CONSONANTS[after]) {
+        out += 'a';
+      }
+      continue;
+    }
+
+    if (DEVANAGARI_CONSONANTS[ch]) {
+      out += DEVANAGARI_CONSONANTS[ch];
+      if (next && DEVANAGARI_CONSONANTS[next]) {
+        out += 'a';
+      }
+      continue;
+    }
+
+    if (DEVANAGARI_INDEPENDENT_VOWELS[ch]) {
+      out += DEVANAGARI_INDEPENDENT_VOWELS[ch];
+      continue;
+    }
+
+    if (DEVANAGARI_MATRAS[ch] !== undefined) {
+      out += DEVANAGARI_MATRAS[ch];
+      continue;
+    }
+
+    out += ch;
+  }
+  return out;
+}
+
 /**
  * Normalizes Devanagari Hindi speech transcripts into Hinglish/English equivalents
- * so both local voice commands and offline chat understand spoken Hindi seamlessly.
+ * so both local voice commands and dynamic app discovery understand spoken Hindi seamlessly.
  */
 export function normalizeHindiToHinglish(input: string): string {
   let s = input.toLowerCase().trim();
@@ -22,20 +91,37 @@ export function normalizeHindiToHinglish(input: string): string {
     [/बैटरी|बैट्री/g, 'battery'],
     [/वॉल्यूम|आवाज़|आवाज|साउंड/g, 'volume'],
     [/ब्राइटनेस|रोशनी|चमक|स्क्रीन\s*ब्राइटनेस/g, 'brightness'],
-    [/ऑन|चालू|चलाओ|जलाओ|जला\s*दो|ऑन\s*करो|ऑन\s*कर\s*दो/g, 'on'],
+    [/ऑन|चालू|जलाओ|जला\s*दो|ऑन\s*करो|ऑन\s*कर\s*दो/g, 'on'],
     [/ऑफ|ऑफ़|बंद|बन्द|बुझाओ|बुझा\s*दो/g, 'off'],
     [/बढ़ाओ|बढाओ|तेज़|तेज|ज़्यादा|ज्यादा|ऊपर/g, 'up'],
     [/कम\s*करो|कम|धीमा|धीमे|घटाओ|नीचे/g, 'down'],
-    [/खोलो|खोल\s*दो|खोल|ओपन/g, 'open'],
+    [/खोलो|खोल\s*दो|खोल|ओपन|लॉन्च|चलाओ/g, 'open'],
     [/कर\s*दो|करो|कीजिए|दीजिए/g, 'karo'],
-    // Apps
+    [/में|मे|अंदर/g, 'mein'],
+    [/पर|पे/g, 'par'],
+    [/वेबसाइट|साइट/g, 'website'],
+    [/ऐप|एप्प|एप्लिकेशन/g, 'app'],
+    // Popular Hindi App Names & System Apps
     [/यूट्यूब|यू\s*ट्यूब/g, 'youtube'],
     [/व्हाट्सएप|व्हाट्सऐप|वॉट्सऐप|वाट्सएप/g, 'whatsapp'],
+    [/फेसबुक|फ़ेसबुक|फेस\s*बुक/g, 'facebook'],
+    [/इंस्टाग्राम|इंस्टा/g, 'instagram'],
+    [/फ्लिपकार्ट|फ्लिप\s*कार्ट/g, 'flipkart'],
+    [/अमेज़न|अमेजन|अमाजॉन/g, 'amazon'],
+    [/ज़ोमैटो|जोमैटो/g, 'zomato'],
+    [/स्विगी/g, 'swiggy'],
+    [/पेटीएम|पे\s*टीएम/g, 'paytm'],
+    [/फोनपे|फ़ोनपे|फोन\s*पे/g, 'phonepe'],
+    [/गूगल\s*पे|जीपे/g, 'google pay'],
+    [/हॉटस्टार|डिज़्नी\s*हॉटस्टार/g, 'hotstar'],
+    [/नेटफ्लिक्स/g, 'netflix'],
+    [/ट्रूकॉलर|ट्रू\s*कॉलर/g, 'truecaller'],
     [/मैप्स|मैप|गूगल\s*मैप/g, 'maps'],
     [/मीट|गूगल\s*मीट/g, 'meet'],
     [/मैसेज|मैसेजेस|संदेश/g, 'messages'],
     [/मूवी\s*बॉक्स|मूवीबॉक्स/g, 'moviebox'],
-    [/म्यूजिक|म्यूज़िक|गाना|गाने|संगीत/g, 'music'],
+    [/म्यूजिक|म्यूज़िक|संगीत/g, 'music'],
+    [/गाना|गाने/g, 'song'],
     [/माय\s*जियो|माई\s*जियो|जियो/g, 'myjio'],
     [/नोट्स|नोट/g, 'notes'],
     [/फ़ोन|फोन|डायलर/g, 'phone'],
@@ -58,9 +144,10 @@ export function normalizeHindiToHinglish(input: string): string {
     [/कैमरा/g, 'camera'],
     [/कैलकुलेटर/g, 'calculator'],
     [/जीमेल|ईमेल/g, 'gmail'],
-    [/इंस्टाग्राम|इंस्टा/g, 'instagram'],
     [/स्पॉटिफाई/g, 'spotify'],
     [/क्रोम|ब्राउज़र/g, 'chrome'],
+    [/हिंदी/g, 'hindi'],
+    [/अंग्रेजी|इंग्लिश/g, 'english'],
     // Math & Common intents
     [/जोड़ो|जोड़|प्लस/g, 'plus'],
     [/घटाओ|माइनस/g, 'minus'],
@@ -88,6 +175,11 @@ export function normalizeHindiToHinglish(input: string): string {
 
   for (const [pattern, replacement] of replacements) {
     s = s.replace(pattern, ` ${replacement} `);
+  }
+
+  // Fallback transliteration for any remaining Devanagari words (e.g. arbitrary third-party app names)
+  if (/[\u0900-\u097F]/.test(s)) {
+    s = transliterateDevanagariToLatin(s);
   }
 
   return s.replace(/\s+/g, ' ').trim();

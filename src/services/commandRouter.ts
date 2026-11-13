@@ -283,6 +283,15 @@ export const PHONE_APPS_DIRECTORY: KnownAppEntry[] = [
     replyMsg: 'Instagram khol rahi hoon!',
   },
   {
+    key: 'facebook',
+    name: 'Facebook',
+    aliases: ['facebook', 'fb'],
+    packageName: 'com.facebook.katana',
+    webUrl: 'https://www.facebook.com',
+    deepLink: 'fb://',
+    replyMsg: 'Facebook app open kar rahi hoon!',
+  },
+  {
     key: 'chrome',
     name: 'Chrome',
     aliases: ['chrome', 'browser', 'google chrome'],
@@ -542,7 +551,11 @@ export class CommandRouter {
   }
 
   private extractQueryAfterKeywords(text: string, removePattern: RegExp): string {
-    return text.replace(removePattern, ' ').replace(/\s+/g, ' ').trim();
+    return text
+      .replace(removePattern, ' ')
+      .replace(/^[.।!?,;\s]+|[.।!?,;\s]+$/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
   }
 
   private triggerAndroidBridge(action: string, value?: any): boolean {
@@ -557,7 +570,9 @@ export class CommandRouter {
     text: string,
     currentDeviceState: DeviceState
   ): Promise<CommandExecutionResult> {
-    const query = normalizeHindiToHinglish(text);
+    const query = normalizeHindiToHinglish(text)
+      .replace(/[.।!?,;]+$/g, '')
+      .trim();
 
     // 0. SECURITY GUARDRAIL: Never bypass OTP, lock screens, login screens, or security protections
     if (
@@ -1109,7 +1124,7 @@ export class CommandRouter {
       const targetQuery =
         this.extractQueryAfterKeywords(
           query,
-          /\b(youtube|par|me|mein|on|in|for|search|play|chalao|dhundho|song|songs|gaane|gana|karo|open|kholo)\b/gi
+          /\b(youtube|par|pe|me|mein|on|in|for|search|play|chalao|dhundho|karo|open|kholo)\b/gi
         ) || 'trending songs';
       const ytWeb = `https://www.youtube.com/results?search_query=${encodeURIComponent(targetQuery)}`;
       const bridgeRes = isNativeBridge ? this.runBridgeCommand('youtube_search', targetQuery) : null;
@@ -1130,12 +1145,13 @@ export class CommandRouter {
       };
     }
 
-    // Chrome: Open requested website explicitly in Chrome
+    // Chrome: Open requested website explicitly in Chrome (handles URL, "<site> website", or "Chrome mein website kholo")
     if (
       query.includes('chrome') &&
       (query.includes('http') ||
         /\b[a-z0-9-]+\.(com|org|in|net|io|co|gov|edu)\b/i.test(query) ||
-        query.includes('website'))
+        query.includes('website') ||
+        query.includes('site'))
     ) {
       if (!androidBridge.isAppControlAllowed('com.android.chrome')) {
         return {
@@ -1145,28 +1161,44 @@ export class CommandRouter {
         };
       }
       const urlMatch = query.match(/(https?:\/\/[^\s]+|[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:\/[^\s]*)?)/);
+      let finalUrl = '';
       if (urlMatch) {
         const rawUrl = urlMatch[1];
-        const finalUrl = /^https?:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
-        const bridgeRes = isNativeBridge ? this.runBridgeCommand('chrome_open_url', finalUrl) : null;
-        if (bridgeRes?.status === 'not_installed') {
-          return { handled: true, actionType: 'app_not_installed', reply: bridgeRes.message };
+        finalUrl = /^https?:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
+      } else {
+        const topic = this.extractQueryAfterKeywords(
+          query,
+          /\b(google|chrome|mein|me|par|pe|on|in|website|site|open|kholo|karo|chalao)\b/gi
+        );
+        if (topic) {
+          finalUrl = `https://www.google.com/search?q=${encodeURIComponent(topic)}`;
         }
-        if (bridgeRes?.status === 'permission_denied') {
-          return { handled: true, actionType: 'permission_denied', reply: bridgeRes.message };
-        }
-        return {
-          handled: true,
-          reply: `Chrome app me ${finalUrl} open kar rahi hoon!`,
-          actionType: 'chrome_open_url',
-          externalUrl: bridgeRes?.ok
-            ? undefined
-            : this.isAndroidDevice()
-            ? this.buildDeepIntentUrl(finalUrl, 'com.android.chrome')
-            : finalUrl,
-          externalLabel: `Open ${finalUrl} in Chrome`,
-        };
       }
+
+      const bridgeRes = isNativeBridge
+        ? this.runBridgeCommand('chrome_open_url', finalUrl || '')
+        : null;
+      if (bridgeRes?.status === 'not_installed') {
+        return { handled: true, actionType: 'app_not_installed', reply: bridgeRes.message };
+      }
+      if (bridgeRes?.status === 'permission_denied') {
+        return { handled: true, actionType: 'permission_denied', reply: bridgeRes.message };
+      }
+      return {
+        handled: true,
+        reply: finalUrl
+          ? `Chrome app me ${finalUrl} open kar rahi hoon!`
+          : 'Google Chrome app open kar rahi hoon! Aap website URL bolkar direct bhi open kar sakte hain.',
+        actionType: 'chrome_open_url',
+        externalUrl: bridgeRes?.ok
+          ? undefined
+          : this.isAndroidDevice()
+          ? finalUrl
+            ? this.buildDeepIntentUrl(finalUrl, 'com.android.chrome')
+            : 'intent:#Intent;action=android.intent.action.MAIN;category=android.intent.category.LAUNCHER;package=com.android.chrome;end'
+          : finalUrl || 'https://www.google.com',
+        externalLabel: finalUrl ? `Open ${finalUrl} in Chrome` : 'Open Chrome App',
+      };
     }
 
     // Pinterest Search
@@ -1861,7 +1893,42 @@ export class CommandRouter {
       };
     }
 
-    // 10. UNIVERSAL PHONE APP LAUNCHER (Checks real bridge installation + user permissions, never fake browser tabs!)
+    // 9B. DYNAMIC UNIVERSAL IN-APP SEARCH ("<Any Installed App> mein/par <query> search karo")
+    if (isNativeBridge) {
+      const inAppMatch = query.match(
+        /^(.+?)\s+(?:mein|me|par|pe|on|in)\s+(.+?)\s+(?:search|dhundho|khojo|play|chalao)(?:\s+karo)?$/i
+      );
+      if (inAppMatch) {
+        const rawApp = inAppMatch[1].trim();
+        const searchTerm = inAppMatch[2].trim();
+        const discoveredForSearch = androidBridge.findBestInstalledApp(rawApp);
+        if (discoveredForSearch) {
+          if (!androidBridge.isAppControlAllowed(discoveredForSearch.packageName)) {
+            return {
+              handled: true,
+              actionType: 'permission_denied',
+              reply: `${discoveredForSearch.appName} control aapne App Control permissions me disabled kiya hua hai.`,
+            };
+          }
+          const bridgeRes = this.runBridgeCommand(
+            'in_app_search',
+            `${discoveredForSearch.appName}|${searchTerm}`
+          );
+          if (bridgeRes.status === 'permission_denied') {
+            return { handled: true, actionType: 'permission_denied', reply: bridgeRes.message };
+          }
+          if (bridgeRes.ok) {
+            return {
+              handled: true,
+              reply: bridgeRes.message || `${discoveredForSearch.appName} me "${searchTerm}" search kar rahi hoon!`,
+              actionType: 'in_app_search',
+            };
+          }
+        }
+      }
+    }
+
+    // 10. UNIVERSAL PHONE APP LAUNCHER (Dynamic PackageManager Discovery FIRST when bridged, never fake browser tabs!)
     const isLaunchIntent =
       /\b(open|kholo|kholiye|khole|launch|start|khol|dikhao|dikhaiye|chalu|chalao|chalaiye|lagao|nikalo|bajao)\b/.test(query) ||
       query.includes('chalu karo') ||
@@ -1884,6 +1951,12 @@ export class CommandRouter {
         },
       };
     }
+
+    // Extract clean app name candidate (supports Hindi/Hinglish/English phrasing)
+    const cleanAppCandidate = query
+      .replace(/\b(open|kholo|kholiye|khole|launch|start|chalu|khol|dikhao|dikhaiye|karo|do|app|application|please|jarvis)\b/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
 
     // Check user-added custom apps stored in localStorage first
     try {
@@ -1924,6 +1997,84 @@ export class CommandRouter {
       // ignore invalid localStorage data
     }
 
+    // NATIVE ANDROID COMPANION PATH: Dynamically check ALL real installed phone apps via PackageManager FIRST!
+    if (isNativeBridge && cleanAppCandidate) {
+      const discovered = androidBridge.findBestInstalledApp(cleanAppCandidate);
+      const directoryHint = PHONE_APPS_DIRECTORY.find((app) =>
+        app.aliases.some((alias) => query === alias || (isLaunchIntent && query.includes(alias)))
+      );
+
+      if (discovered && (isLaunchIntent || cleanAppCandidate === discovered.appName.toLowerCase())) {
+        if (!androidBridge.isAppControlAllowed(discovered.packageName)) {
+          return {
+            handled: true,
+            actionType: 'permission_denied',
+            reply: `${discovered.appName} control aapne Apps Hub Permissions me band kiya hua hai. Pehle permission enable karein.`,
+          };
+        }
+        const res = this.runBridgeCommand('open_app', discovered.packageName);
+        if (res.ok) {
+          return {
+            handled: true,
+            reply: res.message || `${discovered.appName} open kar rahi hoon!`,
+            actionType: directoryHint ? `open_${directoryHint.key}` : 'open_dynamic_app',
+          };
+        }
+        if (res.status === 'permission_denied') {
+          return { handled: true, actionType: 'permission_denied', reply: res.message };
+        }
+      }
+
+      // If not matched directly from cached JSON or user spoke an alias (e.g. "dialer", "gallery"),
+      // ask Kotlin CommandRouter + InstalledAppDiscovery directly before ever concluding not installed.
+      if (isLaunchIntent || directoryHint) {
+        if (directoryHint && !androidBridge.isAppControlAllowed(directoryHint.packageName)) {
+          return {
+            handled: true,
+            actionType: 'permission_denied',
+            reply: `${directoryHint.name} control aapne Apps Hub Permissions me band kiya hua hai. Pehle permission enable karein.`,
+          };
+        }
+
+        const primaryRes = directoryHint
+          ? this.runBridgeCommand('open_app', directoryHint.packageName)
+          : this.runBridgeCommand('open_app_name', cleanAppCandidate);
+
+        if (primaryRes.ok) {
+          return {
+            handled: true,
+            reply: directoryHint ? directoryHint.replyMsg : (primaryRes.message || `${cleanAppCandidate} phone me open kar diya hai!`),
+            actionType: directoryHint ? `open_${directoryHint.key}` : 'open_generic_app',
+          };
+        }
+        if (primaryRes.status === 'permission_denied') {
+          return { handled: true, actionType: 'permission_denied', reply: primaryRes.message };
+        }
+
+        // Critical: if packageName alias returned not_installed, try dynamic PackageManager label fallback too!
+        if (directoryHint) {
+          const dynamicFallbackRes = this.runBridgeCommand('open_app_name', directoryHint.name);
+          if (dynamicFallbackRes.ok) {
+            return {
+              handled: true,
+              reply: dynamicFallbackRes.message || directoryHint.replyMsg,
+              actionType: `open_${directoryHint.key}`,
+            };
+          }
+          if (dynamicFallbackRes.status === 'permission_denied') {
+            return { handled: true, actionType: 'permission_denied', reply: dynamicFallbackRes.message };
+          }
+        }
+
+        return {
+          handled: true,
+          actionType: 'app_not_installed',
+          reply: `"${directoryHint ? directoryHint.name : cleanAppCandidate}" aapke phone ke installed launchable apps me nahi mila.`,
+        };
+      }
+    }
+
+    // WEB BROWSER / NON-BRIDGED PATH: Use explicit Android Intent URIs for known apps, never open fake tabs
     for (const app of PHONE_APPS_DIRECTORY) {
       const matchedAlias = app.aliases.some(
         (alias) =>
@@ -1936,29 +2087,6 @@ export class CommandRouter {
             handled: true,
             actionType: 'permission_denied',
             reply: `${app.name} control aapne Apps Hub Permissions me band kiya hua hai. Pehle permission enable karein.`,
-          };
-        }
-
-        if (isNativeBridge) {
-          const res = this.runBridgeCommand('open_app', app.packageName);
-          if (res.status === 'not_installed') {
-            return {
-              handled: true,
-              actionType: 'app_not_installed',
-              reply: `${app.name} (${app.packageName}) aapke phone me installed nahi hai.`,
-            };
-          }
-          if (res.status === 'permission_denied') {
-            return {
-              handled: true,
-              actionType: 'permission_denied',
-              reply: res.message,
-            };
-          }
-          return {
-            handled: true,
-            reply: app.replyMsg,
-            actionType: `open_${app.key}`,
           };
         }
 
@@ -1987,7 +2115,7 @@ export class CommandRouter {
           handled: true,
           reply: launchUrl
             ? app.replyMsg
-            : `${app.name} direct browser me available nahi hai — Android phone par real app kholne ke liye JARVIS Android Companion use karein.`,
+            : `${app.name} browser se direct launch nahi ho sakta — real phone app kholne ke liye JARVIS Native Android Companion use karein.`,
           actionType: `open_${app.key}`,
           externalUrl: launchUrl,
           externalLabel: launchUrl ? `Open ${app.name} on Phone` : undefined,
@@ -1996,46 +2124,14 @@ export class CommandRouter {
       }
     }
 
-    // Generic fallback for any other app named by the user with "open/kholo":
-    // Checks real native PackageManager if bridged; NEVER opens a fake browser search tab!
-    if (isLaunchIntent) {
-      const appNameRaw = query
-        .replace(/\b(open|kholo|launch|start|chalu|khol|dikhao|karo|do|app|please|jarvis)\b/gi, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-
-      if (appNameRaw) {
-        if (isNativeBridge) {
-          const res = this.runBridgeCommand('open_app_name', appNameRaw);
-          if (res.status === 'not_installed') {
-            return {
-              handled: true,
-              actionType: 'app_not_installed',
-              reply: `"${appNameRaw}" aapke phone me installed nahi mila. Kripya app ka sahi naam check karein.`,
-            };
-          }
-          if (res.status === 'permission_denied') {
-            return {
-              handled: true,
-              actionType: 'permission_denied',
-              reply: res.message,
-            };
-          }
-          if (res.ok) {
-            return {
-              handled: true,
-              reply: res.message || `${appNameRaw} phone me open kar diya hai!`,
-              actionType: 'open_generic_app',
-            };
-          }
-        }
-
-        return {
-          handled: true,
-          actionType: 'app_not_installed',
-          reply: `"${appNameRaw}" is browser me installed nahi hai ya verify nahi ho sakta. Real phone apps discover aur launch karne ke liye Settings → 04 APK Download se Native Android Companion install karein.`,
-        };
-      }
+    // Generic fallback in browser mode when user names an app not in standard intent aliases:
+    // Be honest about browser limitation (never falsely claim an installed phone app is missing!).
+    if (isLaunchIntent && cleanAppCandidate) {
+      return {
+        handled: true,
+        actionType: 'native_companion_required',
+        reply: `Standard web browser "${cleanAppCandidate}" jaise phone ke sabhi installed apps ko dynamically scan nahi kar sakta. Phone me installed har app ko automatic detect aur open karne ke liye Settings → 04 APK Download se Native Android Companion APK run karein.`,
+      };
     }
 
     // 11. TIME & DATE

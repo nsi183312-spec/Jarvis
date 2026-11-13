@@ -82,6 +82,15 @@ export const ANDROID_PROJECT_FILES: AndroidProjectFile[] = [
         <package android:name="com.google.android.gm" />
         <package android:name="com.spotify.music" />
         <package android:name="com.instagram.android" />
+        <package android:name="com.facebook.katana" />
+        <package android:name="com.facebook.lite" />
+        <package android:name="com.flipkart.android" />
+        <package android:name="in.amazon.mShop.android.shopping" />
+        <package android:name="com.application.zomato" />
+        <package android:name="in.swiggy.android" />
+        <package android:name="com.truecaller" />
+        <package android:name="in.startv.hotstar" />
+        <package android:name="com.netflix.mediaclient" />
         <package android:name="com.phonepe.app" />
         <package android:name="com.google.android.apps.nbu.paisa.user" />
         <package android:name="net.one97.paytm" />
@@ -586,19 +595,46 @@ class CommandRouter(
             }
         }
 
-        // Universal App Launcher (InstalledAppDiscovery -> real PackageManager launch or clear NotInstalled)
-        if (text.startsWith("open ") || text.startsWith("kholo ") || text.contains("chalu karo") || text.contains("open karo")) {
-            val appQuery = text.replace(Regex("^(open|kholo)\\\\s+"), "").replace(Regex("\\\\s*(chalu karo|khol do|open karo|app)"), "").trim()
-            for ((aliases, packages) in appPackageMap) {
-                if (aliases.any { appQuery == it || appQuery.contains(it) }) {
-                    return launchFirstAvailable(packages, appQuery + " open kar rahi hoon!")
+        // Universal App Launcher (Dynamic PackageManager Discovery FIRST!)
+        val inAppSearchMatch = Regex("^(.+?)\\\\s+(?:mein|me|par|pe|on|in)\\\\s+(.+?)\\\\s+(?:search|dhundho|khojo|play|chalao)(?:\\\\s+karo)?$").find(text)
+        if (inAppSearchMatch != null) {
+            val rawAppPart = inAppSearchMatch.groupValues[1].trim()
+            val searchQuery = inAppSearchMatch.groupValues[2].trim()
+            val matchedApp = discovery.findBestMatchingInstalledApp(rawAppPart)
+            if (matchedApp != null) {
+                if (!discovery.isAppAllowed(matchedApp.packageName)) return CommandResult.PermissionDenied("app_control", "User ne " + matchedApp.appName + " control disable kiya hai.")
+                val searchIntent = Intent(Intent.ACTION_SEARCH).apply { setPackage(matchedApp.packageName); putExtra(SearchManager.QUERY, searchQuery); flags = Intent.FLAG_ACTIVITY_NEW_TASK }
+                if (searchIntent.resolveActivity(context.packageManager) != null) {
+                    context.startActivity(searchIntent)
+                    return CommandResult.Handled(matchedApp.appName + " app me " + searchQuery + " search kar rahi hoon!")
                 }
+                val mediaIntent = Intent(MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH).apply { setPackage(matchedApp.packageName); putExtra(SearchManager.QUERY, searchQuery); flags = Intent.FLAG_ACTIVITY_NEW_TASK }
+                if (mediaIntent.resolveActivity(context.packageManager) != null) {
+                    context.startActivity(mediaIntent)
+                    return CommandResult.Handled(matchedApp.appName + " app me " + searchQuery + " play kar rahi hoon!")
+                }
+                launchPackageDirectly(matchedApp.packageName)
+                return CommandResult.Handled(matchedApp.appName + " open kar diya hai! Note: Yeh app direct external search intent support nahi karta.")
             }
-            val discovered = discovery.findBestMatchingInstalledApp(appQuery)
-            if (discovered != null) {
+        }
+
+        val hasLaunchVerb = text.startsWith("open ") || text.startsWith("kholo ") || text.contains("chalu karo") || text.contains("open karo") || text.contains("kholo") || text.contains("chalao")
+        val strippedQuery = text.replace(Regex("\\\\b(open|kholo|launch|start|chalu|chalao|karo|do|app|application|please|jarvis)\\\\b"), " ").replace(Regex("\\\\s+"), " ").trim()
+        if (strippedQuery.isNotEmpty()) {
+            val discovered = discovery.findBestMatchingInstalledApp(strippedQuery)
+            if (discovered != null && (hasLaunchVerb || discovered.appName.equals(strippedQuery, ignoreCase = true))) {
                 return launchPackageDirectly(discovered.packageName)
             }
-            return CommandResult.NotInstalled(appQuery, appQuery + " app phone me installed nahi hai.")
+            if (hasLaunchVerb) {
+                for ((aliases, packages) in appPackageMap) {
+                    if (aliases.any { strippedQuery == it || strippedQuery.contains(it) }) {
+                        for (pkg in packages) {
+                            if (discovery.isPackageInstalled(pkg)) return launchPackageDirectly(pkg)
+                        }
+                    }
+                }
+                return CommandResult.NotInstalled(strippedQuery, strippedQuery + " app phone me installed nahi mila.")
+            }
         }
 
         if (text.contains("battery")) {
@@ -679,16 +715,25 @@ class CommandRouter(
     name: 'InstalledAppDiscovery.kt',
     category: 'kotlin',
     language: 'kotlin',
-    description: 'Queries ONLY real installed launchable Android apps via PackageManager with per-app allow/block storage.',
+    description: 'Dynamically discovers ALL real launchable Android apps via PackageManager with Hindi transliteration and fuzzy matching.',
     content: `package com.jarvis.ai.discovery
 
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.os.Build
 import org.json.JSONArray
 import org.json.JSONObject
 
-data class InstalledAppInfo(val appName: String, val packageName: String, val isAllowed: Boolean)
+data class InstalledAppInfo(
+    val appName: String,
+    val packageName: String,
+    val activityName: String,
+    val isAllowed: Boolean,
+    val isSystemApp: Boolean
+)
 
 class InstalledAppDiscovery(private val context: Context) {
     private val prefs = context.getSharedPreferences("jarvis_allowed_apps_prefs", Context.MODE_PRIVATE)
@@ -696,17 +741,53 @@ class InstalledAppDiscovery(private val context: Context) {
 
     fun discoverLaunchableApps(): List<InstalledAppInfo> {
         val intent = Intent(Intent.ACTION_MAIN, null).addCategory(Intent.CATEGORY_LAUNCHER)
-        val resolved = pm.queryIntentActivities(intent, 0)
+        val resolved = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            pm.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(PackageManager.MATCH_ALL.toLong()))
+        } else {
+            @Suppress("DEPRECATION")
+            pm.queryIntentActivities(intent, 0)
+        }
         val seen = HashSet<String>()
         val list = mutableListOf<InstalledAppInfo>()
         for (ri in resolved) {
-            val pkg = ri.activityInfo?.packageName ?: continue
+            val ai = ri.activityInfo ?: continue
+            val pkg = ai.packageName ?: continue
             if (pkg == context.packageName || !seen.add(pkg)) continue
-            if (pm.getLaunchIntentForPackage(pkg) == null) continue
             val label = ri.loadLabel(pm)?.toString()?.trim().orEmpty()
-            if (label.isNotEmpty()) list.add(InstalledAppInfo(label, pkg, isAppAllowed(pkg)))
+            if (label.isEmpty()) continue
+            val isSys = (ai.applicationInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+            list.add(InstalledAppInfo(label, pkg, ai.name ?: "", isAppAllowed(pkg), isSys))
+        }
+        val allApps = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            pm.getInstalledApplications(PackageManager.ApplicationInfoFlags.of(0L))
+        } else {
+            @Suppress("DEPRECATION")
+            pm.getInstalledApplications(0)
+        }
+        for (app in allApps) {
+            val pkg = app.packageName ?: continue
+            if (pkg == context.packageName || seen.contains(pkg)) continue
+            val li = pm.getLaunchIntentForPackage(pkg) ?: continue
+            val label = pm.getApplicationLabel(app)?.toString()?.trim().orEmpty()
+            if (label.isEmpty()) continue
+            seen.add(pkg)
+            val isSys = (app.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+            list.add(InstalledAppInfo(label, pkg, li.component?.className ?: "", isAppAllowed(pkg), isSys))
         }
         return list.sortedBy { it.appName.lowercase() }
+    }
+
+    fun buildLaunchIntent(packageName: String): Intent? {
+        pm.getLaunchIntentForPackage(packageName)?.let {
+            it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            return it
+        }
+        val match = discoverLaunchableApps().firstOrNull { it.packageName == packageName && it.activityName.isNotEmpty() } ?: return null
+        return Intent(Intent.ACTION_MAIN).apply {
+            addCategory(Intent.CATEGORY_LAUNCHER)
+            component = ComponentName(match.packageName, match.activityName)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+        }
     }
 
     fun toJsonString(): String {
@@ -715,15 +796,41 @@ class InstalledAppDiscovery(private val context: Context) {
             arr.put(JSONObject().apply {
                 put("appName", it.appName)
                 put("packageName", it.packageName)
+                put("activityName", it.activityName)
                 put("isAllowed", it.isAllowed)
+                put("isSystemApp", it.isSystemApp)
             })
         }
         return arr.toString()
     }
 
-    fun isPackageInstalled(pkg: String): Boolean = pm.getLaunchIntentForPackage(pkg) != null
+    fun isPackageInstalled(pkg: String): Boolean = pm.getLaunchIntentForPackage(pkg) != null || discoverLaunchableApps().any { it.packageName == pkg }
     fun isAppAllowed(pkg: String): Boolean = prefs.getBoolean("allow_$pkg", true)
     fun setAppAllowed(pkg: String, allowed: Boolean) { prefs.edit().putBoolean("allow_$pkg", allowed).apply() }
+
+    fun findBestMatchingInstalledApp(spokenName: String): InstalledAppInfo? {
+        val clean = spokenName.trim().lowercase().replace(Regex("\\\\b(open|kholo|launch|start|chalu|chalao|karo|do|app|application|please|jarvis|खोलो|ओपन|करो)\\\\b"), " ").replace(Regex("\\\\s+"), " ").trim()
+        val cleanNorm = clean.replace(Regex("[^a-z0-9]"), "")
+        if (cleanNorm.isEmpty()) return null
+        val apps = discoverLaunchableApps()
+        val ignored = setOf("com", "org", "net", "in", "android", "google", "apps", "app")
+        var best: InstalledAppInfo? = null
+        var bestScore = 0.0
+        for (app in apps) {
+            val l = app.appName.lowercase().trim()
+            val ln = l.replace(Regex("[^a-z0-9]"), "")
+            val pkgTokens = app.packageName.lowercase().split('.').filter { it.isNotEmpty() && it !in ignored }
+            val score = when {
+                l == clean || ln == cleanNorm || app.packageName.lowercase() == clean -> 1.0
+                pkgTokens.any { it == cleanNorm } -> 0.92
+                ln.startsWith(cleanNorm) || (ln.length >= 3 && cleanNorm.startsWith(ln)) -> 0.88
+                ln.contains(cleanNorm) || (ln.length >= 3 && cleanNorm.contains(ln)) -> 0.84
+                else -> 0.0
+            }
+            if (score > bestScore) { bestScore = score; best = app }
+        }
+        return best
+    }
 }`
   },
   {
@@ -735,32 +842,43 @@ class InstalledAppDiscovery(private val context: Context) {
     content: `package com.jarvis.ai.bridge
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
+import android.provider.Settings
 import android.webkit.JavascriptInterface
 import com.jarvis.ai.discovery.InstalledAppDiscovery
 import com.jarvis.ai.router.CommandResult
 import com.jarvis.ai.router.CommandRouter
+import com.jarvis.ai.service.JarvisAccessibilityService
 import org.json.JSONObject
 
 class JarvisWebBridge(private val context: Context, private val originProvider: () -> String) {
     private val discovery = InstalledAppDiscovery(context)
     private val router = CommandRouter(context, discovery)
-    private val approved = setOf("open_app", "open_app_name", "youtube_search", "maps_navigate", "chrome_open_url", "whatsapp_send", "gmail_compose", "open_dialer", "open_camera", "open_gallery", "open_settings")
+    private val approved = setOf(
+        "open_app", "open_app_name", "youtube_play", "youtube_search", "maps_navigate",
+        "chrome_open_url", "whatsapp_send", "gmail_compose", "pinterest_search", "store_search",
+        "in_app_search", "open_url", "open_dialer", "open_camera", "open_gallery", "open_settings",
+        "open_sub_settings", "open_wifi_settings", "open_bluetooth_settings", "open_data_settings",
+        "call", "sms", "alarm", "flashlight", "mobile_data", "wifi", "bluetooth", "hotspot",
+        "airplane_mode", "dnd", "volume", "brightness", "music_next", "music_prev", "music_pause",
+        "scroll_down", "scroll_up", "click", "type", "screenshot", "go_home", "go_back", "recents"
+    )
 
     private fun trusted(): Boolean {
         val u = Uri.parse(originProvider())
         val host = u.host?.lowercase() ?: return false
-        return (u.scheme == "https" && (host == "localhost" || host.endsWith(".run.app"))) || (u.scheme == "http" && host == "localhost")
+        return (u.scheme == "https" && (host == "localhost" || host.endsWith(".run.app"))) || (u.scheme == "http" && (host == "localhost" || host == "127.0.0.1"))
     }
 
-    @JavascriptInterface
-    fun getInstalledAppsJson(): String = if (trusted()) discovery.toJsonString() else "[]"
-
-    @JavascriptInterface
-    fun setAppAllowed(pkg: String, allowed: Boolean): Boolean {
+    @JavascriptInterface fun getBridgeVersion(): String = "2.1.0"
+    @JavascriptInterface fun getInstalledAppsJson(): String = if (trusted()) discovery.toJsonString() else "[]"
+    @JavascriptInterface fun isAppAllowed(pkg: String): Boolean = if (trusted()) discovery.isAppAllowed(pkg) else false
+    @JavascriptInterface fun setAppAllowed(pkg: String, allowed: Boolean): Boolean { if (!trusted()) return false; discovery.setAppAllowed(pkg, allowed); return true }
+    @JavascriptInterface fun isAccessibilityEnabled(): Boolean = trusted() && JarvisAccessibilityService.isRunning
+    @JavascriptInterface fun openAccessibilitySettings(): Boolean {
         if (!trusted()) return false
-        discovery.setAppAllowed(pkg, allowed)
-        return true
+        return try { context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }); true } catch (_: Exception) { false }
     }
 
     @JavascriptInterface
@@ -769,13 +887,31 @@ class JarvisWebBridge(private val context: Context, private val originProvider: 
             return JSONObject().put("ok", false).put("status", "blocked_action").put("message", "Untrusted or unapproved action").toString()
         }
         val arg = payload.orEmpty().trim()
-        val res = if (action == "open_app") router.launchPackageDirectly(arg) else router.routeCommand("$action $arg")
-        return when (res) {
-            is CommandResult.Handled -> JSONObject().put("ok", true).put("status", "executed").put("message", res.message).put("installed", true).toString()
-            is CommandResult.NotInstalled -> JSONObject().put("ok", false).put("status", "not_installed").put("message", res.reason).put("installed", false).toString()
-            is CommandResult.PermissionDenied -> JSONObject().put("ok", false).put("status", "permission_denied").put("message", res.reason).toString()
-            else -> JSONObject().put("ok", false).put("status", "error").put("message", "Failed").toString()
+        val mapped = when (action) {
+            "open_app" -> return toJson(router.launchPackageDirectly(arg))
+            "open_app_name" -> "open $arg"
+            "youtube_play", "youtube_search" -> "youtube search $arg"
+            "maps_navigate" -> "maps navigate $arg"
+            "chrome_open_url", "open_url" -> "chrome open $arg"
+            "whatsapp_send" -> "whatsapp message $arg"
+            "gmail_compose" -> "gmail send $arg"
+            "in_app_search" -> {
+                val sep = arg.indexOf('|')
+                if (sep > 0) arg.substring(0, sep) + " mein " + arg.substring(sep + 1) + " search karo" else "open $arg"
+            }
+            "open_camera" -> "open camera"
+            "open_gallery" -> "open gallery"
+            "open_settings" -> "open settings"
+            else -> "$action $arg"
         }
+        return toJson(router.routeCommand(mapped))
+    }
+
+    private fun toJson(res: CommandResult): String = when (res) {
+        is CommandResult.Handled -> JSONObject().put("ok", true).put("status", "executed").put("message", res.message).put("installed", true).toString()
+        is CommandResult.NotInstalled -> JSONObject().put("ok", false).put("status", "not_installed").put("message", res.reason).put("installed", false).toString()
+        is CommandResult.PermissionDenied -> JSONObject().put("ok", false).put("status", "permission_denied").put("message", res.reason).put("requiresPermission", res.permissionType).toString()
+        else -> JSONObject().put("ok", false).put("status", "error").put("message", "Failed").toString()
     }
 }`
   },
@@ -789,6 +925,10 @@ class JarvisWebBridge(private val context: Context, private val originProvider: 
 
 import android.annotation.SuppressLint
 import android.os.Bundle
+import android.webkit.PermissionRequest
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
@@ -802,8 +942,21 @@ class WebCompanionActivity : ComponentActivity() {
         val wv = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
+            settings.mediaPlaybackRequiresUserGesture = false
+            settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+            settings.allowFileAccess = false
+            settings.allowContentAccess = false
             webViewClient = object : WebViewClient() {
+                override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                    val host = request?.url?.host?.lowercase() ?: return true
+                    return !(host == "localhost" || host == "127.0.0.1" || host.endsWith(".run.app"))
+                }
                 override fun onPageFinished(view: WebView?, url: String?) { if (url != null) currentUrl = url }
+            }
+            webChromeClient = object : WebChromeClient() {
+                override fun onPermissionRequest(request: PermissionRequest?) {
+                    request?.grant(request.resources)
+                }
             }
             addJavascriptInterface(JarvisWebBridge(applicationContext) { currentUrl }, "JarvisAndroid")
             loadUrl(currentUrl)
@@ -817,11 +970,13 @@ class WebCompanionActivity : ComponentActivity() {
     name: 'JarvisAccessibilityService.kt',
     category: 'service',
     language: 'kotlin',
-    description: 'Enables safe Android Home, Back, Recents actions, and accessible UI label navigation without bypassing security.',
+    description: 'Optional user-authorized Accessibility service for screen scroll, click, typing, screenshot, and Home/Back navigation.',
     content: `package com.jarvis.ai.service
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.os.Build
+import android.os.Bundle
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 
@@ -829,15 +984,16 @@ class JarvisAccessibilityService : AccessibilityService() {
     companion object {
         var instance: JarvisAccessibilityService? = null
             private set
+        val isRunning: Boolean get() = instance != null
     }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
         val info = AccessibilityServiceInfo().apply {
-            eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or AccessibilityEvent.TYPE_VIEW_CLICKED
+            eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or AccessibilityEvent.TYPE_VIEW_CLICKED or AccessibilityEvent.TYPE_VIEW_SCROLLED
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
-            flags = AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
+            flags = AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
         }
         serviceInfo = info
     }
@@ -845,13 +1001,36 @@ class JarvisAccessibilityService : AccessibilityService() {
     fun performGoHome(): Boolean = performGlobalAction(GLOBAL_ACTION_HOME)
     fun performGoBack(): Boolean = performGlobalAction(GLOBAL_ACTION_BACK)
     fun performOpenRecents(): Boolean = performGlobalAction(GLOBAL_ACTION_RECENTS)
-
+    fun takeScreenCapture(): Boolean = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) performGlobalAction(GLOBAL_ACTION_TAKE_SCREENSHOT) else false
+    fun scrollForward(): Boolean = rootInActiveWindow?.let { scrollNode(it, AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) } ?: false
+    fun scrollBackward(): Boolean = rootInActiveWindow?.let { scrollNode(it, AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD) } ?: false
+    fun clickElementByText(text: String): Boolean {
+        val root = rootInActiveWindow ?: return false
+        for (n in root.findAccessibilityNodeInfosByText(text)) {
+            if (n.isClickable && n.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+            var p = n.parent
+            while (p != null) { if (p.isClickable && p.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true; p = p.parent }
+        }
+        return false
+    }
+    fun performTypeText(hint: String, txt: String): Boolean {
+        val root = rootInActiveWindow ?: return false
+        for (n in root.findAccessibilityNodeInfosByText(hint)) {
+            if (n.isEditable) {
+                val args = Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, txt) }
+                return n.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+            }
+        }
+        return false
+    }
+    private fun scrollNode(node: AccessibilityNodeInfo, action: Int): Boolean {
+        if (node.isScrollable) return node.performAction(action)
+        for (i in 0 until node.childCount) { val c = node.getChild(i) ?: continue; if (scrollNode(c, action)) return true }
+        return false
+    }
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
     override fun onInterrupt() {}
-    override fun onDestroy() {
-        super.onDestroy()
-        instance = null
-    }
+    override fun onDestroy() { super.onDestroy(); instance = null }
 }`
   },
   {

@@ -39,6 +39,7 @@ class JarvisWebBridge(
             "gmail_compose",
             "pinterest_search",
             "store_search",
+            "in_app_search",
             "open_url",
             "open_dialer",
             "open_camera",
@@ -183,6 +184,16 @@ class JarvisWebBridge(
             "gmail_compose" -> "gmail send $arg"
             "pinterest_search" -> "pinterest search $arg"
             "store_search" -> "play store search $arg"
+            "in_app_search" -> {
+                val sep = arg.indexOf('|')
+                if (sep > 0) {
+                    val appPart = arg.substring(0, sep).trim()
+                    val qPart = arg.substring(sep + 1).trim()
+                    "$appPart mein $qPart search karo"
+                } else {
+                    "open $arg"
+                }
+            }
             "open_dialer" -> "open phone"
             "open_camera" -> "open camera"
             "open_gallery" -> "open gallery"

@@ -41,6 +41,7 @@ export const APPROVED_BRIDGE_ACTIONS = new Set<string>([
   'gmail_compose',
   'pinterest_search',
   'store_search',
+  'in_app_search',
   'open_url',
   'open_dialer',
   'open_camera',
@@ -193,6 +194,81 @@ class AndroidBridgeClient {
       // parse error
     }
     return { nativeDiscovery: true, apps: [] };
+  }
+
+  /**
+   * Dynamically matches ANY spoken/typed app name (English, Hindi/Hinglish, partial or slightly misspelled)
+   * against the real launchable apps discovered on the phone via Android PackageManager.
+   */
+  public findBestInstalledApp(spokenQuery: string): DiscoveredAndroidApp | null {
+    const { nativeDiscovery, apps } = this.getDiscoveredInstalledApps();
+    if (!nativeDiscovery || apps.length === 0) return null;
+
+    const clean = spokenQuery
+      .toLowerCase()
+      .replace(/\b(open|kholo|kholiye|khole|khol|launch|start|chalu|chalao|karo|do|app|application|please|jarvis|mein|me|par|pe)\b/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!clean) return null;
+
+    const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const cleanNorm = norm(clean);
+    if (!cleanNorm) return null;
+
+    let bestApp: DiscoveredAndroidApp | null = null;
+    let bestScore = 0;
+
+    for (const app of apps) {
+      const labelLower = app.appName.toLowerCase().trim();
+      const labelNorm = norm(labelLower);
+      const pkgLower = app.packageName.toLowerCase();
+      const pkgTokens = pkgLower.split('.').filter((t) => t && !['com', 'org', 'net', 'in', 'android', 'google', 'apps', 'app'].includes(t));
+
+      let score = 0;
+      if (labelLower === clean || labelNorm === cleanNorm || pkgLower === clean) {
+        score = 1.0;
+      } else if (labelLower.split(/\s+/).some((w) => norm(w) === cleanNorm)) {
+        score = 0.94;
+      } else if (pkgTokens.some((t) => t === cleanNorm)) {
+        score = 0.92;
+      } else if (labelNorm.startsWith(cleanNorm) || cleanNorm.startsWith(labelNorm)) {
+        score = 0.88;
+      } else if (labelNorm.includes(cleanNorm) || (labelNorm.length >= 3 && cleanNorm.includes(labelNorm))) {
+        score = 0.84;
+      } else {
+        const sim = this.diceSimilarity(cleanNorm, labelNorm);
+        if (sim >= 0.72) {
+          score = sim * 0.82;
+        }
+      }
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestApp = app;
+      }
+    }
+
+    return bestScore >= 0.6 ? bestApp : null;
+  }
+
+  private diceSimilarity(a: string, b: string): number {
+    if (a === b) return 1;
+    if (a.length < 2 || b.length < 2) return 0;
+    const bigramsA = new Map<string, number>();
+    for (let i = 0; i < a.length - 1; i++) {
+      const bg = a.slice(i, i + 2);
+      bigramsA.set(bg, (bigramsA.get(bg) || 0) + 1);
+    }
+    let intersection = 0;
+    for (let i = 0; i < b.length - 1; i++) {
+      const bg = b.slice(i, i + 2);
+      const count = bigramsA.get(bg) || 0;
+      if (count > 0) {
+        bigramsA.set(bg, count - 1);
+        intersection++;
+      }
+    }
+    return (2 * intersection) / (a.length - 1 + (b.length - 1));
   }
 
   public isAppControlAllowed(packageName: string): boolean {

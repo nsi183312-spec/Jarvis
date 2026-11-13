@@ -62,28 +62,30 @@ class CommandRouter(
         listOf("whatsapp", "whats app") to listOf("com.whatsapp", "com.whatsapp.w4b"),
         listOf("youtube", "yt") to listOf("com.google.android.youtube"),
         listOf("gmail", "email", "mail") to listOf("com.google.android.gm"),
-        listOf("chrome", "google chrome") to listOf("com.android.chrome")
+        listOf("chrome", "google chrome", "browser") to listOf("com.android.chrome"),
+        listOf("facebook", "fb") to listOf("com.facebook.katana", "com.facebook.lite"),
+        listOf("instagram", "insta") to listOf("com.instagram.android"),
+        listOf("spotify") to listOf("com.spotify.music")
     )
 
-    fun launchPackageDirectly(packageName: String): CommandResult {
+    fun launchPackageDirectly(packageName: String, displayName: String? = null): CommandResult {
         if (!discovery.isPackageInstalled(packageName)) {
-            return CommandResult.NotInstalled(packageName, "Yeh app ($packageName) phone me installed nahi hai.")
+            return CommandResult.NotInstalled(displayName ?: packageName, "Yeh app ($packageName) phone me installed nahi hai.")
         }
         if (!discovery.isAppAllowed(packageName)) {
             return CommandResult.PermissionDenied(
                 "app_control",
-                "User ne $packageName ke liye JARVIS app control disable kiya hua hai."
+                "User ne ${displayName ?: packageName} ke liye JARVIS app control disable kiya hua hai."
             )
         }
-        val launchIntent = context.packageManager.getLaunchIntentForPackage(packageName)
-            ?: return CommandResult.NotInstalled(packageName, "$packageName launchable nahi hai.")
-        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val launchIntent = discovery.buildLaunchIntent(packageName)
+            ?: return CommandResult.NotInstalled(displayName ?: packageName, "${displayName ?: packageName} launchable nahi hai.")
         context.startActivity(launchIntent)
-        return CommandResult.Handled("App launch kar diya hai!")
+        return CommandResult.Handled("${displayName ?: "App"} open kar rahi hoon!")
     }
 
     fun routeCommand(input: String): CommandResult {
-        val text = input.trim().lowercase()
+        val text = input.trim().lowercase().trimEnd('.', '।', '!', '?', ',', ';').trim()
 
         // 0. SECURITY GUARDRAIL: Never bypass OTP, lock screens, login screens, or unauthorized purchases
         if (text.contains("bypass") ||
@@ -218,11 +220,14 @@ class CommandRouter(
             return launchPackageDirectly(ytPkg)
         }
 
-        // Chrome: Open requested website explicitly in real Chrome browser
-        if (text.contains("chrome") && (text.contains("http") || text.contains(".com") || text.contains(".org") || text.contains(".in") || text.contains(".net") || text.contains("website") || text.contains("open"))) {
+        // Chrome: Open requested website explicitly in real Chrome browser (never a fake in-app webview!)
+        if (text.contains("chrome") && (text.contains("http") || text.contains(".com") || text.contains(".org") || text.contains(".in") || text.contains(".net") || text.contains("website") || text.contains("site") || text.contains("open") || text.contains("kholo"))) {
             val chromePkg = "com.android.chrome"
             if (!discovery.isPackageInstalled(chromePkg)) {
                 return CommandResult.NotInstalled("Chrome", "Google Chrome app aapke phone me installed nahi hai.")
+            }
+            if (!discovery.isAppAllowed(chromePkg)) {
+                return CommandResult.PermissionDenied("app_control", "User ne Chrome ke liye JARVIS app control off kiya hai.")
             }
             val urlMatch = Regex("""(https?://[^\s]+|[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:/[^\s]*)?)""").find(text)
             if (urlMatch != null) {
@@ -237,7 +242,22 @@ class CommandRouter(
                     return CommandResult.Handled("Chrome app me $finalUrl open kar rahi hoon!")
                 }
             }
-            return launchPackageDirectly(chromePkg)
+            val siteName = text
+                .replace(Regex("\\b(google|chrome|mein|me|par|on|in|website|site|open|kholo|karo|chalao)\\b"), " ")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+            if (siteName.isNotEmpty()) {
+                val targetUrl = "https://www.google.com/search?q=" + Uri.encode(siteName)
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(targetUrl)).apply {
+                    setPackage(chromePkg)
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                if (intent.resolveActivity(context.packageManager) != null) {
+                    context.startActivity(intent)
+                    return CommandResult.Handled("Chrome me \"$siteName\" website open kar rahi hoon!")
+                }
+            }
+            return launchPackageDirectly(chromePkg, "Chrome")
         }
 
         // Google Maps: Locations & Directions in real Google Maps app
@@ -372,28 +392,83 @@ class CommandRouter(
             }
         }
 
-        // 6. UNIVERSAL REAL INSTALLED APP LAUNCHER
-        if (text.startsWith("open ") || text.startsWith("kholo ") || text.contains("chalu karo") || text.contains("open karo")) {
-            val appQuery = text
-                .replace(Regex("^(open|kholo|launch|start)\\s+"), "")
-                .replace(Regex("\\s*(chalu karo|khol do|open karo|app)"), "")
-                .trim()
-
-            for ((aliases, packages) in appPackageMap) {
-                if (aliases.any { appQuery == it || appQuery.contains(it) }) {
-                    return launchFirstAvailable(appQuery, packages)
+        // 5B. DYNAMIC UNIVERSAL IN-APP SEARCH FOR ANY INSTALLED APP ("<App> mein/par <query> search karo")
+        val inAppSearchMatch = Regex("""^(.+?)\s+(?:mein|me|par|pe|on|in)\s+(.+?)\s+(?:search|dhundho|khojo|play|chalao)(?:\s+karo)?$""").find(text)
+        if (inAppSearchMatch != null) {
+            val rawAppPart = inAppSearchMatch.groupValues[1].trim()
+            val searchQuery = inAppSearchMatch.groupValues[2].trim()
+            val matchedApp = discovery.findBestMatchingInstalledApp(rawAppPart)
+            if (matchedApp != null) {
+                if (!discovery.isAppAllowed(matchedApp.packageName)) {
+                    return CommandResult.PermissionDenied(
+                        "app_control",
+                        "User ne ${matchedApp.appName} ke liye JARVIS app control disable kiya hua hai."
+                    )
                 }
+                val searchIntent = Intent(Intent.ACTION_SEARCH).apply {
+                    setPackage(matchedApp.packageName)
+                    putExtra(SearchManager.QUERY, searchQuery)
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                if (searchIntent.resolveActivity(context.packageManager) != null) {
+                    context.startActivity(searchIntent)
+                    return CommandResult.Handled("${matchedApp.appName} app me \"$searchQuery\" search kar rahi hoon!")
+                }
+                val mediaIntent = Intent(MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH).apply {
+                    setPackage(matchedApp.packageName)
+                    putExtra(SearchManager.QUERY, searchQuery)
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                if (mediaIntent.resolveActivity(context.packageManager) != null) {
+                    context.startActivity(mediaIntent)
+                    return CommandResult.Handled("${matchedApp.appName} app me \"$searchQuery\" play kar rahi hoon!")
+                }
+                launchPackageDirectly(matchedApp.packageName, matchedApp.appName)
+                return CommandResult.Handled(
+                    "${matchedApp.appName} open kar diya hai! Note: ${matchedApp.appName} public Android search intent expose nahi karta, isliye search box me khud type karein ya Accessibility assist enable karein."
+                )
+            }
+        }
+
+        // 6. UNIVERSAL REAL INSTALLED APP LAUNCHER (Dynamic PackageManager Discovery FIRST!)
+        val hasLaunchVerb = text.startsWith("open ") ||
+            text.startsWith("kholo ") ||
+            text.startsWith("launch ") ||
+            text.startsWith("start ") ||
+            text.contains("chalu karo") ||
+            text.contains("open karo") ||
+            text.contains("kholo") ||
+            text.contains("khol do") ||
+            text.contains("chalao")
+
+        val strippedAppQuery = text
+            .replace(Regex("""\b(open|kholo|kholiye|khole|khol|launch|start|chalu|chalao|karo|do|app|application|please|jarvis|खोलो|ओपन|करो)\b"""), " ")
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+
+        if (strippedAppQuery.isNotEmpty()) {
+            // Priority 1: Dynamically search ALL real launchable apps installed on the user's phone!
+            val discoveredApp = discovery.findBestMatchingInstalledApp(strippedAppQuery)
+            if (discoveredApp != null && (hasLaunchVerb || discoveredApp.appName.equals(strippedAppQuery, ignoreCase = true))) {
+                return launchPackageDirectly(discoveredApp.packageName, discoveredApp.appName)
             }
 
-            val discoveredApp = discovery.findBestMatchingInstalledApp(appQuery)
-            if (discoveredApp != null) {
-                return launchPackageDirectly(discoveredApp.packageName)
+            // Priority 2: Known system/OEM synonym fallback if OEM app name differs (e.g. "dialer" -> "Phone")
+            if (hasLaunchVerb) {
+                for ((aliases, packages) in appPackageMap) {
+                    if (aliases.any { strippedAppQuery == it || strippedAppQuery.contains(it) }) {
+                        for (pkg in packages) {
+                            if (discovery.isPackageInstalled(pkg)) {
+                                return launchPackageDirectly(pkg, strippedAppQuery)
+                            }
+                        }
+                    }
+                }
+                return CommandResult.NotInstalled(
+                    strippedAppQuery,
+                    "\"$strippedAppQuery\" aapke phone ke launchable apps me nahi mila."
+                )
             }
-
-            return CommandResult.NotInstalled(
-                appQuery,
-                "\"$appQuery\" app aapke phone me installed nahi mila."
-            )
         }
 
         // 7. VOLUME, ALARM, BATTERY, TIME
