@@ -14,6 +14,7 @@ import {
 } from './types';
 import { THEMES } from './theme';
 import { voiceEngine } from './services/voiceEngine';
+import { geminiLiveClient } from './services/geminiLiveClient';
 import { commandRouter } from './services/commandRouter';
 import { generateOfflineSmartReply, tryEvaluateOfflineArithmetic } from './services/offlineBrain';
 import { useOnlineStatus } from './hooks/useOnlineStatus';
@@ -60,6 +61,7 @@ import {
   ExternalLink,
   X,
   Timer,
+  Radio,
 } from 'lucide-react';
 
 function isNativePhoneUri(url: string): boolean {
@@ -77,7 +79,16 @@ function launchExternalUrlSafe(url: string) {
     } catch {
       // Cross-origin iframe fallback
     }
-    window.location.href = url;
+    try {
+      const nativeAnchor = document.createElement('a');
+      nativeAnchor.href = url;
+      nativeAnchor.style.display = 'none';
+      document.body.appendChild(nativeAnchor);
+      nativeAnchor.click();
+      document.body.removeChild(nativeAnchor);
+    } catch {
+      window.location.href = url;
+    }
     return;
   }
   const anchor = document.createElement('a');
@@ -112,6 +123,7 @@ export default function App() {
   const [audioLevel, setAudioLevel] = useState<number>(0);
   const [textInput, setTextInput] = useState<string>('');
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  const [liveStatus, setLiveStatus] = useState<'disconnected' | 'connecting' | 'live'>('disconnected');
   const [micNotice, setMicNotice] = useState<string>('');
   const [micStatusDetail, setMicStatusDetail] = useState<string>('');
   const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
@@ -392,6 +404,89 @@ export default function App() {
         setMicStatusDetail(detail);
       },
     });
+
+    let lastLiveUserPrompt = '';
+    geminiLiveClient.setCallbacks({
+      onStatusChange: (status) => {
+        setLiveStatus(status);
+        if (status === 'connecting') {
+          setAssistantState('thinking');
+          setMicStatusDetail('Gemini Live Voice connect ho raha hai...');
+        } else if (status === 'live') {
+          setAssistantState('listening');
+          setMicNotice('');
+          setMicStatusDetail('Gemini Live Voice active — seedha baat karein');
+        } else {
+          setMicStatusDetail('');
+          if (!isProcessingRef.current) {
+            setAssistantState('idle');
+          }
+        }
+      },
+      onInputTranscript: (text) => {
+        lastLiveUserPrompt = text;
+        setCurrentSpokenText(text);
+      },
+      onOutputTranscript: (text, isFinal) => {
+        setAssistantState('speaking');
+        if (isFinal) {
+          setCurrentSpokenText('');
+          const spokenPrompt = lastLiveUserPrompt.trim();
+          lastLiveUserPrompt = '';
+
+          if (spokenPrompt) {
+            commandRouter.executeLocalCommand(spokenPrompt, deviceStateRef.current).then((res) => {
+              if (res.handled) {
+                if (res.deviceStateUpdate) {
+                  setDeviceState((prev) => ({ ...prev, ...res.deviceStateUpdate }));
+                }
+                if (res.externalUrl) {
+                  launchExternalUrlSafe(res.externalUrl);
+                }
+              }
+            });
+          }
+
+          setMessages((prev) => [
+            ...prev,
+            ...(spokenPrompt
+              ? [
+                  {
+                    id: 'msg_live_u_' + Date.now(),
+                    sender: 'user' as const,
+                    text: spokenPrompt,
+                    timestamp: new Date().toLocaleTimeString('en-IN', {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    }),
+                  },
+                ]
+              : []),
+            {
+              id: 'msg_live_j_' + (Date.now() + 1),
+              sender: 'jarvis' as const,
+              text,
+              timestamp: new Date().toLocaleTimeString('en-IN', {
+                hour: '2-digit',
+                minute: '2-digit',
+              }),
+              intent: 'ai_chat',
+            },
+          ]);
+          if (geminiLiveClient.isRunning()) {
+            setAssistantState('listening');
+          }
+        }
+      },
+      onAudioLevel: (level) => {
+        setAudioLevel(level);
+      },
+      onError: (msg) => {
+        setMicNotice(msg);
+        setLiveStatus('disconnected');
+        setAssistantState('idle');
+      },
+    });
   }, []);
 
   // Scroll chat to bottom
@@ -573,11 +668,32 @@ export default function App() {
         }),
       });
 
+      const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        throw new Error(`Server returned ${response.status}`);
+        const apiErrorReply =
+          data?.reply ||
+          data?.error ||
+          `Server returned ${response.status}. Please check GEMINI_API_KEY in Settings > Secrets.`;
+        setAvatarMood('empathetic');
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: 'msg_err_' + Date.now(),
+            sender: 'jarvis',
+            text: apiErrorReply,
+            timestamp: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
+            intent: 'ai_chat',
+          },
+        ]);
+        if (currentSettings.autoSpeak) {
+          speakResponse(apiErrorReply);
+          setAssistantState('speaking');
+        } else {
+          setAssistantState('idle');
+        }
+        return;
       }
 
-      const data = await response.json();
       const replyText =
         data.reply || 'Ji! Main aapki baat samajh gayi. Kripya batayein agla command kya hai?';
 
@@ -628,9 +744,15 @@ export default function App() {
   processInputRef.current = handleProcessVoiceInput;
 
   const handleToggleListening = () => {
-    if (assistantState === 'listening') {
-      voiceEngine.stopListening();
+    if (geminiLiveClient.isRunning()) {
+      geminiLiveClient.stop();
       setAssistantState('idle');
+      return;
+    }
+    if (assistantState === 'listening') {
+      const wasRecorder = voiceEngine.isAudioRecorderActive();
+      voiceEngine.stopListening();
+      setAssistantState(wasRecorder ? 'thinking' : 'idle');
     } else if (assistantState === 'speaking') {
       voiceEngine.stopSpeaking();
       setAssistantState('idle');
@@ -639,6 +761,23 @@ export default function App() {
         voiceSettings.preferredLanguage === 'en-IN' ? 'en-IN' : 'hi-IN'
       );
     }
+  };
+
+  const handleToggleGeminiLive = () => {
+    if (geminiLiveClient.isRunning() || liveStatus === 'connecting') {
+      geminiLiveClient.stop();
+      setAssistantState('idle');
+      return;
+    }
+    voiceEngine.stopListening(true);
+    voiceEngine.stopSpeaking();
+    setMicNotice('');
+    geminiLiveClient.start({
+      voiceId: voiceSettings.elevenLabsVoiceId?.startsWith('gemini:')
+        ? voiceSettings.elevenLabsVoiceId
+        : 'Kore',
+      language: voiceSettings.preferredLanguage,
+    });
   };
 
   const handleToggleFlashlight = async () => {
@@ -1009,15 +1148,34 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Tap to Speak Caption + Debug Mic */}
-                  <div className="flex items-center justify-center gap-2 text-xs sm:text-sm">
+                  {/* Tap to Speak Caption + Live Voice + Debug Mic */}
+                  <div className="flex flex-wrap items-center justify-center gap-2 text-xs sm:text-sm">
                     <span className="font-semibold text-white tracking-wide">
-                      {assistantState === 'listening'
+                      {liveStatus === 'live'
+                        ? 'Gemini Live Active — Boliye'
+                        : liveStatus === 'connecting'
+                        ? 'Connecting Live Voice...'
+                        : assistantState === 'listening'
                         ? micStatusDetail || 'Listening... Speak Now'
                         : assistantState === 'speaking'
                         ? 'Speaking... Tap Mic to Stop'
+                        : assistantState === 'thinking'
+                        ? 'Processing voice...'
                         : 'Tap to Speak'}
                     </span>
+                    <span className="text-slate-600">·</span>
+                    <button
+                      type="button"
+                      onClick={handleToggleGeminiLive}
+                      className={`inline-flex items-center gap-1 text-xs font-semibold transition ${
+                        liveStatus !== 'disconnected'
+                          ? 'text-emerald-300 hover:text-emerald-200'
+                          : 'text-cyan-300 hover:text-white'
+                      }`}
+                    >
+                      <Radio className={`w-3.5 h-3.5 ${liveStatus === 'live' ? 'animate-pulse' : ''}`} />
+                      <span>{liveStatus !== 'disconnected' ? 'Stop Live' : 'Gemini Live'}</span>
+                    </button>
                     <span className="text-slate-600">·</span>
                     <button
                       type="button"
@@ -1633,13 +1791,6 @@ export default function App() {
         target={confirmationModal.target}
         onConfirm={confirmationModal.onConfirm}
         onCancel={() => setConfirmationModal((m) => ({ ...m, isOpen: false }))}
-      />
-
-      {/* Viewport Brightness Simulation Scrim (synced with Set screen brightness) */}
-      <div
-        className="fixed inset-0 bg-black pointer-events-none z-[100] transition-opacity duration-300"
-        style={{ opacity: Math.max(0, Math.min(0.65, (100 - deviceState.brightness) / 140)) }}
-        aria-hidden="true"
       />
     </div>
   );

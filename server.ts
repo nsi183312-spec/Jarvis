@@ -1,14 +1,16 @@
 import express, { Request, Response } from 'express';
+import http from 'http';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
-import { GoogleGenAI } from '@google/genai';
+import { WebSocketServer, WebSocket } from 'ws';
+import { GoogleGenAI, LiveServerMessage, Modality, Type } from '@google/genai';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-dotenv.config({ path: path.resolve(__dirname, '.env'), override: true });
+dotenv.config({ path: path.resolve(__dirname, '.env'), override: false });
 
 // Helper for offline smart conversational persona logic
 function generateSmartPersonaReply(message: string): { reply: string; intent: string; action: any; detectedLanguage: string } {
@@ -182,12 +184,13 @@ async function startServer() {
 
   app.use(express.json({ limit: '15mb' }));
 
-  // Shared Gemini client
-  let ai: GoogleGenAI | null = null;
-  if (process.env.GEMINI_API_KEY) {
+  // Shared Gemini client factory (uses server-side process.env.GEMINI_API_KEY from Settings > Secrets)
+  const getGeminiClient = (): GoogleGenAI | null => {
+    const apiKey = process.env.GEMINI_API_KEY?.trim();
+    if (!apiKey) return null;
     try {
-      ai = new GoogleGenAI({
-        apiKey: process.env.GEMINI_API_KEY,
+      return new GoogleGenAI({
+        apiKey,
         httpOptions: {
           headers: {
             'User-Agent': 'aistudio-build',
@@ -195,12 +198,65 @@ async function startServer() {
         },
       });
     } catch {
-      ai = null;
+      return null;
     }
-  }
+  };
 
   const DEFAULT_ELEVENLABS_VOICE_ID = 'ihKwLOjVUMG4lgUI6meZ'; // User-requested Voice ID (Leo - Curious Character)
   const FALLBACK_PREMADE_VOICE_ID = 'cgSgspJ2msm6clMCkdW9'; // Jessica - Playful, Bright, Warm (Free-tier compatible HD voice)
+
+  const GEMINI_VOICE_PERSONAS = [
+    {
+      voice_id: 'gemini:Kore',
+      name: 'JARVIS Gemini Voice — Kore (Warm Female)',
+      gender: 'female',
+      accent: 'multilingual',
+      descriptive: 'sweet, clear',
+      age: 'young',
+      supportsHindi: true,
+      provider: 'gemini',
+    },
+    {
+      voice_id: 'gemini:Zephyr',
+      name: 'JARVIS Gemini Voice — Zephyr (Bright & Friendly)',
+      gender: 'female',
+      accent: 'multilingual',
+      descriptive: 'bright, energetic',
+      age: 'young',
+      supportsHindi: true,
+      provider: 'gemini',
+    },
+    {
+      voice_id: 'gemini:Puck',
+      name: 'Gemini Live Voice — Puck (Upbeat)',
+      gender: 'neutral',
+      accent: 'multilingual',
+      descriptive: 'playful',
+      age: 'young',
+      supportsHindi: true,
+      provider: 'gemini',
+    },
+    {
+      voice_id: 'gemini:Charon',
+      name: 'Gemini Voice — Charon (Calm)',
+      gender: 'male',
+      accent: 'multilingual',
+      descriptive: 'calm, clear',
+      age: 'adult',
+      supportsHindi: true,
+      provider: 'gemini',
+    },
+    {
+      voice_id: 'gemini:Fenrir',
+      name: 'Gemini Voice — Fenrir (Deep)',
+      gender: 'male',
+      accent: 'multilingual',
+      descriptive: 'deep',
+      age: 'adult',
+      supportsHindi: true,
+      provider: 'gemini',
+    },
+  ];
 
   // Health check endpoint
   app.get('/api/health', (req: Request, res: Response) => {
@@ -210,7 +266,12 @@ async function startServer() {
       persona: 'Cute Indian Female AI Voice Assistant',
       timestamp: new Date().toISOString(),
       hasApiKey: Boolean(process.env.GEMINI_API_KEY),
-      hasVoiceApi: Boolean(process.env.ELEVENLABS_API_KEY),
+      hasVoiceApi: Boolean(process.env.ELEVENLABS_API_KEY || process.env.GEMINI_API_KEY),
+      geminiLiveReady: Boolean(process.env.GEMINI_API_KEY),
+      geminiModel: 'gemini-4-hydrogen',
+      geminiLiveModel: 'gemini-3.8-live',
+      geminiTtsModel: 'gemini-3.8-flash-lite-tts',
+      geminiTranscribeModel: 'gemini-3.5-transcribe',
       defaultVoiceId: DEFAULT_ELEVENLABS_VOICE_ID,
     });
   });
@@ -218,86 +279,73 @@ async function startServer() {
   // Neural TTS status endpoint
   app.get('/api/tts/status', (req: Request, res: Response) => {
     res.json({
-      available: Boolean(process.env.ELEVENLABS_API_KEY),
-      provider: 'elevenlabs',
+      available: Boolean(process.env.ELEVENLABS_API_KEY || process.env.GEMINI_API_KEY),
+      provider: process.env.GEMINI_API_KEY ? 'gemini+elevenlabs' : 'elevenlabs',
       defaultVoiceId: DEFAULT_ELEVENLABS_VOICE_ID,
       fallbackVoiceId: FALLBACK_PREMADE_VOICE_ID,
-      model: 'eleven_flash_v2_5',
+      geminiDefaultVoiceId: 'gemini:Kore',
+      model: 'gemini-3.8-flash-lite-tts',
     });
   });
 
-  // List available neural voices (proxied securely from ElevenLabs)
+  // List available neural voices (Gemini Voice Assistant voices + ElevenLabs voices if configured)
   app.get('/api/tts/voices', async (req: Request, res: Response) => {
     const apiKey = process.env.ELEVENLABS_API_KEY;
-    if (!apiKey) {
-      res.status(503).json({ voices: [], error: 'Voice API key not configured on server' });
-      return;
-    }
+    let elevenLabsVoices: any[] = [];
 
-    try {
-      const resp = await fetch('https://api.elevenlabs.io/v1/voices', {
-        headers: { 'xi-api-key': apiKey },
-      });
-
-      if (!resp.ok) {
-        res.status(resp.status).json({ voices: [], error: 'Failed to fetch voices' });
-        return;
-      }
-
-      const data: any = await resp.json();
-      const voices = Array.isArray(data?.voices)
-        ? data.voices.map((v: any) => ({
-            voice_id: v.voice_id,
-            name: v.name,
-            gender: v.labels?.gender || 'unknown',
-            accent: v.labels?.accent || '',
-            descriptive: v.labels?.descriptive || '',
-            age: v.labels?.age || '',
-            supportsHindi: Array.isArray(v.verified_languages)
-              ? v.verified_languages.some((l: any) => l.language === 'hi')
-              : false,
-          }))
-        : [];
-
-      // Ensure user's requested Voice ID is selectable in the list
-      if (!voices.some((v: any) => v.voice_id === DEFAULT_ELEVENLABS_VOICE_ID)) {
-        voices.unshift({
-          voice_id: DEFAULT_ELEVENLABS_VOICE_ID,
-          name: 'Leo - Curious Character (Custom ID: ihKwLOjVUMG4lgUI6meZ)',
-          gender: 'neutral',
-          accent: 'latin american',
-          descriptive: 'upbeat',
-          age: 'young',
-          supportsHindi: false,
+    if (apiKey) {
+      try {
+        const resp = await fetch('https://api.elevenlabs.io/v1/voices', {
+          headers: { 'xi-api-key': apiKey },
         });
+
+        if (resp.ok) {
+          const data: any = await resp.json();
+          elevenLabsVoices = Array.isArray(data?.voices)
+            ? data.voices.map((v: any) => ({
+                voice_id: v.voice_id,
+                name: v.name,
+                gender: v.labels?.gender || 'unknown',
+                accent: v.labels?.accent || '',
+                descriptive: v.labels?.descriptive || '',
+                age: v.labels?.age || '',
+                supportsHindi: Array.isArray(v.verified_languages)
+                  ? v.verified_languages.some((l: any) => l.language === 'hi')
+                  : false,
+                provider: 'elevenlabs',
+              }))
+            : [];
+        }
+      } catch {
+        // Gracefully ignore ElevenLabs errors and still return Gemini Voice Assistant personas
       }
-
-      // Prioritize user's default ID, then Jessica & female voices
-      voices.sort((a: any, b: any) => {
-        if (a.voice_id === DEFAULT_ELEVENLABS_VOICE_ID) return -1;
-        if (b.voice_id === DEFAULT_ELEVENLABS_VOICE_ID) return 1;
-        if (a.voice_id === FALLBACK_PREMADE_VOICE_ID) return -1;
-        if (b.voice_id === FALLBACK_PREMADE_VOICE_ID) return 1;
-        const aFemale = a.gender === 'female' ? 0 : 1;
-        const bFemale = b.gender === 'female' ? 0 : 1;
-        if (aFemale !== bFemale) return aFemale - bFemale;
-        return (b.supportsHindi ? 1 : 0) - (a.supportsHindi ? 1 : 0);
-      });
-
-      res.json({ voices, defaultVoiceId: DEFAULT_ELEVENLABS_VOICE_ID });
-    } catch (err: any) {
-      res.status(502).json({ voices: [], error: err?.message || 'Voice list fetch error' });
     }
+
+    const voices = [...GEMINI_VOICE_PERSONAS, ...elevenLabsVoices];
+
+    // Ensure user's requested Voice ID is selectable in the list
+    if (!voices.some((v: any) => v.voice_id === DEFAULT_ELEVENLABS_VOICE_ID)) {
+      voices.push({
+        voice_id: DEFAULT_ELEVENLABS_VOICE_ID,
+        name: 'Leo - Curious Character (ElevenLabs ID: ihKwLOjVUMG4lgUI6meZ)',
+        gender: 'neutral',
+        accent: 'latin american',
+        descriptive: 'upbeat',
+        age: 'young',
+        supportsHindi: false,
+        provider: 'elevenlabs',
+      });
+    }
+
+    res.json({
+      voices,
+      defaultVoiceId: DEFAULT_ELEVENLABS_VOICE_ID,
+      geminiDefaultVoiceId: 'gemini:Kore',
+    });
   });
 
-  // ElevenLabs Text-to-Speech proxy endpoint (returns audio/mpeg)
+  // Neural Text-to-Speech endpoint (supports Gemini 3.8 Flash Lite TTS + ElevenLabs with automatic Gemini fallback)
   app.post('/api/tts', async (req: Request, res: Response) => {
-    const apiKey = process.env.ELEVENLABS_API_KEY;
-    if (!apiKey) {
-      res.status(503).json({ error: 'Voice API key not configured on server' });
-      return;
-    }
-
     const { text, voiceId, speed } = req.body || {};
     if (!text || typeof text !== 'string' || !text.trim()) {
       res.status(400).json({ error: 'Text is required for speech synthesis' });
@@ -316,71 +364,159 @@ async function startServer() {
       return;
     }
 
-    const safeVoiceId =
-      typeof voiceId === 'string' && /^[a-zA-Z0-9_-]{8,64}$/.test(voiceId)
-        ? voiceId
-        : DEFAULT_ELEVENLABS_VOICE_ID;
+    const synthesizeWithGeminiTts = async (targetGeminiVoice: string) => {
+      const ai = getGeminiClient();
+      if (!ai) {
+        return { ok: false as const, status: 503, error: 'GEMINI_API_KEY not configured in Settings > Secrets' };
+      }
 
-    const clampedSpeed =
-      typeof speed === 'number' && !Number.isNaN(speed)
-        ? Math.min(1.2, Math.max(0.7, speed))
-        : 1.0;
+      const validNames = new Set(['Puck', 'Charon', 'Kore', 'Fenrir', 'Zephyr']);
+      const voiceName = validNames.has(targetGeminiVoice) ? targetGeminiVoice : 'Kore';
 
-    const requestElevenLabsAudio = async (targetVoiceId: string) => {
-      return fetch(`https://api.elevenlabs.io/v1/text-to-speech/${targetVoiceId}`, {
-        method: 'POST',
-        headers: {
-          'xi-api-key': apiKey,
-          'Content-Type': 'application/json',
-          Accept: 'audio/mpeg',
-        },
-        body: JSON.stringify({
-          text: cleanText,
-          model_id: 'eleven_flash_v2_5',
-          voice_settings: {
-            stability: 0.45,
-            similarity_boost: 0.78,
-            style: 0.35,
-            use_speaker_boost: true,
-            speed: clampedSpeed,
+      try {
+        const response = await ai.models.generateContent({
+          model: 'gemini-3.8-flash-lite-tts',
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: cleanText,
+                  speechMetadata: {
+                    style: 'Warm, cute, polite Indian female assistant speaking Hindi/Hinglish/English clearly',
+                  },
+                } as any,
+              ],
+            },
+          ],
+          config: {
+            responseModalities: ['AUDIO'],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName },
+              },
+            },
           },
-        }),
-      });
+        });
+
+        const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+        if (!base64Audio) {
+          return { ok: false as const, status: 502, error: 'Gemini TTS returned empty audio' };
+        }
+        return {
+          ok: true as const,
+          buffer: Buffer.from(base64Audio, 'base64'),
+          voiceName,
+        };
+      } catch (err: any) {
+        const status = Number(err?.status) || 502;
+        return {
+          ok: false as const,
+          status,
+          error: err?.message || 'Gemini TTS synthesis failed',
+        };
+      }
     };
 
-    try {
-      let ttsResp = await requestElevenLabsAudio(safeVoiceId);
-      let usedFallback = false;
-      let fallbackReason = '';
+    const requestedVoice = typeof voiceId === 'string' ? voiceId.trim() : '';
+    const wantsGeminiExplicitly = requestedVoice.startsWith('gemini:');
+    const geminiVoiceName = wantsGeminiExplicitly ? requestedVoice.slice('gemini:'.length) : 'Kore';
 
-      if (
-        !ttsResp.ok &&
-        (ttsResp.status === 402 || ttsResp.status === 400 || ttsResp.status === 404) &&
-        safeVoiceId !== FALLBACK_PREMADE_VOICE_ID
-      ) {
-        fallbackReason = ttsResp.status === 402 ? 'paid_plan_required' : `http_${ttsResp.status}`;
-        ttsResp = await requestElevenLabsAudio(FALLBACK_PREMADE_VOICE_ID);
-        usedFallback = true;
-      }
-
-      if (!ttsResp.ok) {
-        const errText = await ttsResp.text().catch(() => 'TTS API error');
-        res.status(ttsResp.status).json({ error: errText });
+    // 1. Direct Gemini TTS if selected
+    if (wantsGeminiExplicitly) {
+      const gRes = await synthesizeWithGeminiTts(geminiVoiceName);
+      if (gRes.ok) {
+        res.setHeader('Content-Type', 'audio/wav');
+        res.setHeader('Content-Length', String(gRes.buffer.length));
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('X-Voice-Provider', 'gemini');
+        res.setHeader('X-Active-Voice-Id', `gemini:${gRes.voiceName}`);
+        res.send(gRes.buffer);
         return;
       }
-
-      const audioBuffer = Buffer.from(await ttsResp.arrayBuffer());
-      res.setHeader('Content-Type', 'audio/mpeg');
-      res.setHeader('Content-Length', String(audioBuffer.length));
-      res.setHeader('Cache-Control', 'no-store');
-      res.setHeader('X-Active-Voice-Id', usedFallback ? FALLBACK_PREMADE_VOICE_ID : safeVoiceId);
-      if (usedFallback) {
-        res.setHeader('X-Voice-Fallback', fallbackReason);
-      }
-      res.send(audioBuffer);
-    } catch (err: any) {
-      res.status(502).json({ error: err?.message || 'Neural TTS failed' });
+      res.status(gRes.status).json({ error: gRes.error });
+      return;
     }
+
+    // 2. Try ElevenLabs if configured, otherwise / on 401/402/error fall back to Gemini TTS
+    const elevenApiKey = process.env.ELEVENLABS_API_KEY;
+    if (elevenApiKey) {
+      const safeVoiceId =
+        /^[a-zA-Z0-9_-]{8,64}$/.test(requestedVoice) ? requestedVoice : DEFAULT_ELEVENLABS_VOICE_ID;
+      const clampedSpeed =
+        typeof speed === 'number' && !Number.isNaN(speed)
+          ? Math.min(1.2, Math.max(0.7, speed))
+          : 1.0;
+
+      const requestElevenLabsAudio = async (targetVoiceId: string) => {
+        return fetch(`https://api.elevenlabs.io/v1/text-to-speech/${targetVoiceId}`, {
+          method: 'POST',
+          headers: {
+            'xi-api-key': elevenApiKey,
+            'Content-Type': 'application/json',
+            Accept: 'audio/mpeg',
+          },
+          body: JSON.stringify({
+            text: cleanText,
+            model_id: 'eleven_flash_v2_5',
+            voice_settings: {
+              stability: 0.45,
+              similarity_boost: 0.78,
+              style: 0.35,
+              use_speaker_boost: true,
+              speed: clampedSpeed,
+            },
+          }),
+        });
+      };
+
+      try {
+        let ttsResp = await requestElevenLabsAudio(safeVoiceId);
+        let usedFallback = false;
+        let fallbackReason = '';
+
+        if (
+          !ttsResp.ok &&
+          (ttsResp.status === 402 || ttsResp.status === 400 || ttsResp.status === 404) &&
+          safeVoiceId !== FALLBACK_PREMADE_VOICE_ID
+        ) {
+          fallbackReason = ttsResp.status === 402 ? 'paid_plan_required' : `http_${ttsResp.status}`;
+          ttsResp = await requestElevenLabsAudio(FALLBACK_PREMADE_VOICE_ID);
+          usedFallback = true;
+        }
+
+        if (ttsResp.ok) {
+          const audioBuffer = Buffer.from(await ttsResp.arrayBuffer());
+          res.setHeader('Content-Type', 'audio/mpeg');
+          res.setHeader('Content-Length', String(audioBuffer.length));
+          res.setHeader('Cache-Control', 'no-store');
+          res.setHeader('X-Voice-Provider', 'elevenlabs');
+          res.setHeader('X-Active-Voice-Id', usedFallback ? FALLBACK_PREMADE_VOICE_ID : safeVoiceId);
+          if (usedFallback) {
+            res.setHeader('X-Voice-Fallback', fallbackReason);
+          }
+          res.send(audioBuffer);
+          return;
+        }
+      } catch {
+        // Fall through to Gemini TTS
+      }
+    }
+
+    // 3. Automatic Gemini TTS fallback when ElevenLabs is missing or returns 401/error
+    const geminiFallback = await synthesizeWithGeminiTts('Kore');
+    if (geminiFallback.ok) {
+      res.setHeader('Content-Type', 'audio/wav');
+      res.setHeader('Content-Length', String(geminiFallback.buffer.length));
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('X-Voice-Provider', 'gemini');
+      res.setHeader('X-Active-Voice-Id', `gemini:${geminiFallback.voiceName}`);
+      res.setHeader('X-Voice-Fallback', 'elevenlabs_unavailable_used_gemini');
+      res.send(geminiFallback.buffer);
+      return;
+    }
+
+    res.status(geminiFallback.status).json({ error: geminiFallback.error });
   });
 
   // Audio transcription fallback endpoint when browser Web Speech API fails on mobile/WebView
@@ -392,9 +528,10 @@ async function startServer() {
       return;
     }
 
+    const ai = getGeminiClient();
     if (!ai) {
       res.status(503).json({
-        error: 'Cloud audio transcription unavailable without Gemini API key.',
+        error: 'Cloud audio transcription requires GEMINI_API_KEY in Settings > Secrets.',
         transcript: '',
       });
       return;
@@ -424,71 +561,149 @@ async function startServer() {
       const transcript = (response.text || '').trim();
       res.json({ transcript });
     } catch (err: any) {
-      res.status(502).json({
-        error: err?.message || 'Transcription failed',
+      const statusCode = Number(err?.status) || 502;
+      const rawMsg = String(err?.message || 'Transcription failed');
+      let friendly = 'Voice transcription failed. Kripya type karke command dein ya mic settings check karein.';
+      if (statusCode === 403 || rawMsg.includes('PERMISSION_DENIED') || rawMsg.includes('free tier')) {
+        friendly =
+          'Gemini Voice Transcription par 403 PERMISSION_DENIED aaya hai (billing-enabled key required). AI Studio ke Settings > Secrets me active GEMINI_API_KEY check karein.';
+      } else if (statusCode === 400 || rawMsg.includes('API_KEY_INVALID')) {
+        friendly = 'GEMINI_API_KEY invalid hai. Settings > Secrets me sahi key check karein.';
+      } else if (statusCode === 429 || rawMsg.includes('RESOURCE_EXHAUSTED')) {
+        friendly = 'Gemini quota limit poori ho gayi (429). Thodi der baad try karein.';
+      }
+      res.status(statusCode).json({
+        error: friendly,
         transcript: '',
       });
     }
   });
 
-  // Chat & Command Classification endpoint
+  // Chat & Command Classification endpoint (powered by server-side @google/genai)
   app.post('/api/chat', async (req: Request, res: Response) => {
-    const { message, history = [] } = req.body;
+    const { message, history = [], language = 'auto' } = req.body || {};
 
     if (!message || typeof message !== 'string') {
       res.status(400).json({ error: 'Message is required' });
       return;
     }
 
-    // Try Gemini API if client is available
-    if (ai) {
-      try {
-        const systemInstruction = `You are JARVIS AI, a cute, intelligent, and friendly Indian female personal voice assistant.
-Your tone is sweet, soft, polite, enthusiastic, and conversational.
-You speak and understand Hindi, English, and Hinglish.
-Keep spoken replies concise (1-3 sentences) suitable for voice speech.
-Output valid JSON: {"reply": string, "intent": "ai_chat"|"device_control"|"app_launch"|"communication"|"productivity"|"search", "action": null, "detectedLanguage": "hinglish"}`;
+    const ai = getGeminiClient();
+    if (!ai) {
+      res.status(503).json({
+        error: 'GEMINI_API_KEY is not configured in Settings > Secrets.',
+        code: 'API_KEY_MISSING',
+        reply: 'Gemini API key abhi set nahi hai. Kripya AI Studio ke Settings > Secrets panel me GEMINI_API_KEY add karein.',
+      });
+      return;
+    }
 
-        const contents: Array<{ role: string; parts: Array<{ text: string }> }> = [];
-        if (Array.isArray(history)) {
-          for (const item of history.slice(-6)) {
-            if (item && item.text) {
-              const role =
-                item.role === 'assistant' || item.role === 'model' || item.sender === 'jarvis'
-                  ? 'model'
-                  : 'user';
-              contents.push({
-                role,
-                parts: [{ text: item.text }],
-              });
-            }
-          }
+    const systemInstruction = `You are JARVIS AI, a cute, intelligent, and friendly Indian female personal voice assistant.
+Your tone is sweet, soft, polite, helpful, and conversational.
+You understand and answer general knowledge, coding, science, daily life, and study questions accurately in Hindi, English, or Hinglish (preferred language setting: ${language}).
+Keep spoken replies clear and concise (1-4 sentences) suitable for voice speech unless the user asks for details.`;
+
+    const contents: Array<{ role: string; parts: Array<{ text: string }> }> = [];
+    if (Array.isArray(history)) {
+      for (const item of history.slice(-6)) {
+        if (item && item.text) {
+          const role =
+            item.role === 'assistant' || item.role === 'model' || item.sender === 'jarvis'
+              ? 'model'
+              : 'user';
+          contents.push({
+            role,
+            parts: [{ text: item.text }],
+          });
         }
-        contents.push({ role: 'user', parts: [{ text: message }] });
+      }
+    }
+    contents.push({ role: 'user', parts: [{ text: message }] });
 
+    let lastErr: any = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
         const response = await ai.models.generateContent({
           model: 'gemini-4-hydrogen',
           contents,
           config: {
             systemInstruction,
             responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                reply: {
+                  type: Type.STRING,
+                  description: 'Natural, accurate spoken response to the user query.',
+                },
+                intent: {
+                  type: Type.STRING,
+                  description: 'One of ai_chat, device_control, app_launch, communication, productivity, search.',
+                },
+                detectedLanguage: {
+                  type: Type.STRING,
+                  description: 'hinglish, hindi, or english.',
+                },
+              },
+              required: ['reply', 'intent', 'detectedLanguage'],
+            },
           },
         });
 
-        const text = response.text || '{}';
-        const parsed = JSON.parse(text);
+        const rawText = (response.text || '').trim();
+        const cleanedJson = rawText.replace(/^```json\s*/i, '').replace(/```$/i, '').trim();
+        const parsed = JSON.parse(cleanedJson || '{}');
         if (parsed && parsed.reply) {
-          res.json(parsed);
+          res.json({
+            reply: parsed.reply,
+            intent: parsed.intent || 'ai_chat',
+            action: null,
+            detectedLanguage: parsed.detectedLanguage || 'hinglish',
+          });
           return;
         }
-      } catch {
-        // Fall through cleanly to high-quality smart persona engine without dumping error stacks to stdout
+        if (rawText) {
+          res.json({
+            reply: rawText,
+            intent: 'ai_chat',
+            action: null,
+            detectedLanguage: 'hinglish',
+          });
+          return;
+        }
+      } catch (err: any) {
+        lastErr = err;
+        const status = Number(err?.status) || 500;
+        // Retry only on transient 5xx/network errors
+        if (status >= 500 && attempt === 0) {
+          await new Promise((r) => setTimeout(r, 400));
+          continue;
+        }
+        break;
       }
     }
 
-    // Smart persona NLP response engine
-    const result = generateSmartPersonaReply(message);
-    res.json(result);
+    const statusCode = Number(lastErr?.status) || 502;
+    const rawMsg = String(lastErr?.message || 'Gemini API request failed');
+    let friendlyReply =
+      'Gemini AI se jawab laane me dikkat aayi. Kripya AI Studio ke Settings > Secrets me apni GEMINI_API_KEY check karein.';
+
+    if (statusCode === 403 || rawMsg.includes('PERMISSION_DENIED') || rawMsg.includes('free tier')) {
+      friendlyReply =
+        'Gemini API ne is key par 403 PERMISSION_DENIED diya hai (project me billing/paid tier required hai ya key disabled hai). Kripya AI Studio ke Settings > Secrets me active billing-enabled GEMINI_API_KEY select karein.';
+    } else if (statusCode === 400 || rawMsg.includes('API_KEY_INVALID')) {
+      friendlyReply =
+        'Gemini API key invalid hai. Kripya Settings > Secrets panel me sahi GEMINI_API_KEY check karein.';
+    } else if (statusCode === 429 || rawMsg.includes('RESOURCE_EXHAUSTED')) {
+      friendlyReply =
+        'Gemini API quota limit poori ho gayi hai (429). Kripya thodi der baad try karein ya Settings > Secrets me billing-enabled key use karein.';
+    }
+
+    res.status(statusCode).json({
+      error: rawMsg,
+      code: statusCode,
+      reply: friendlyReply,
+    });
   });
 
   // Streaming endpoint for extended conversational queries
@@ -503,6 +718,7 @@ Output valid JSON: {"reply": string, "intent": "ai_chat"|"device_control"|"app_l
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
 
+    const ai = getGeminiClient();
     if (ai) {
       try {
         const responseStream = await ai.models.generateContentStream({
@@ -510,7 +726,7 @@ Output valid JSON: {"reply": string, "intent": "ai_chat"|"device_control"|"app_l
           contents: message,
           config: {
             systemInstruction:
-              'You are JARVIS AI, a cute, sweet Indian female assistant. Reply warmly in Hinglish/English in 2-3 spoken sentences.',
+              'You are JARVIS AI, a cute, sweet Indian female assistant. Reply warmly and accurately in Hinglish/English in 2-3 spoken sentences.',
           },
         });
 
@@ -523,12 +739,14 @@ Output valid JSON: {"reply": string, "intent": "ai_chat"|"device_control"|"app_l
         res.write('data: [DONE]\n\n');
         res.end();
         return;
-      } catch {
-        // Fallback cleanly
+      } catch (err: any) {
+        res.write(`data: ${JSON.stringify({ error: err?.message || 'Gemini stream failed' })}\n\n`);
+        res.write('data: [DONE]\n\n');
+        res.end();
+        return;
       }
     }
 
-    // Stream the smart persona fallback
     const fallback = generateSmartPersonaReply(message).reply;
     res.write(`data: ${JSON.stringify({ text: fallback })}\n\n`);
     res.write('data: [DONE]\n\n');
@@ -565,7 +783,186 @@ Output valid JSON: {"reply": string, "intent": "ai_chat"|"device_control"|"app_l
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const httpServer = http.createServer(app);
+
+  // Real-time Gemini Live Voice Assistant WebSocket bridge (/ws/live)
+  const wss = new WebSocketServer({ server: httpServer, path: '/ws/live' });
+  wss.on('connection', async (clientWs: WebSocket, req) => {
+    const ai = getGeminiClient();
+    if (!ai) {
+      clientWs.send(
+        JSON.stringify({
+          type: 'error',
+          code: 'API_KEY_MISSING',
+          message:
+            'GEMINI_API_KEY set nahi hai. Kripya AI Studio ke Settings > Secrets me active GEMINI_API_KEY add karein.',
+        })
+      );
+      clientWs.close();
+      return;
+    }
+
+    let urlObj: URL | null = null;
+    try {
+      urlObj = new URL(req.url || '/ws/live', 'http://localhost');
+    } catch {
+      urlObj = null;
+    }
+    const requestedVoice = (urlObj?.searchParams.get('voice') || 'Kore').replace(/^gemini:/, '');
+    const validLiveVoices = new Set(['Puck', 'Charon', 'Kore', 'Fenrir', 'Zephyr']);
+    const voiceName = validLiveVoices.has(requestedVoice) ? requestedVoice : 'Kore';
+    const langPref = urlObj?.searchParams.get('lang') || 'auto';
+
+    let session: any = null;
+    let closedByClient = false;
+
+    try {
+      session = await ai.live.connect({
+        model: 'gemini-3.8-live',
+        config: {
+          responseModalities: [Modality.AUDIO],
+          inputAudioTranscription: {},
+          outputAudioTranscription: {},
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName },
+            },
+          },
+          systemInstruction: `You are JARVIS AI, a cute, intelligent, friendly Indian female personal voice assistant.
+Speak warmly and concisely (1-3 sentences) in Hindi, Hinglish, or English (preferred language: ${langPref}).
+Help the user with any general knowledge, science, study, coding, or daily conversation questions accurately.`,
+        },
+        callbacks: {
+          onopen: () => {
+            if (clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(JSON.stringify({ type: 'ready', voiceName, model: 'gemini-3.8-live' }));
+            }
+          },
+          onmessage: (message: LiveServerMessage) => {
+            if (clientWs.readyState !== WebSocket.OPEN) return;
+            const content = message.serverContent;
+
+            if (content?.inputTranscription?.text) {
+              clientWs.send(
+                JSON.stringify({
+                  type: 'input_transcript',
+                  text: content.inputTranscription.text,
+                })
+              );
+            }
+            if (content?.outputTranscription?.text) {
+              clientWs.send(
+                JSON.stringify({
+                  type: 'output_transcript',
+                  text: content.outputTranscription.text,
+                })
+              );
+            }
+            for (const part of content?.modelTurn?.parts ?? []) {
+              if (part.inlineData?.data) {
+                clientWs.send(
+                  JSON.stringify({
+                    type: 'audio',
+                    audio: part.inlineData.data,
+                  })
+                );
+              }
+            }
+            if (content?.interrupted) {
+              clientWs.send(JSON.stringify({ type: 'interrupted' }));
+            }
+            if (content?.turnComplete) {
+              clientWs.send(JSON.stringify({ type: 'turn_complete' }));
+            }
+          },
+          onerror: (err: any) => {
+            if (clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(
+                JSON.stringify({
+                  type: 'error',
+                  code: 502,
+                  message: err?.message || 'Gemini Live session error occurred.',
+                })
+              );
+            }
+          },
+          onclose: (event: any) => {
+            if (closedByClient) return;
+            const reason = String(event?.reason || '');
+            const code = event?.code || 1000;
+            if (clientWs.readyState === WebSocket.OPEN) {
+              if (code === 1008 || reason.includes('free tier') || reason.includes('PERMISSION_DENIED')) {
+                clientWs.send(
+                  JSON.stringify({
+                    type: 'error',
+                    code: 403,
+                    message:
+                      'Gemini Live Voice par 403 / billing required aaya hai: is project me Gemini API free tier available nahi hai. Kripya AI Studio ke Settings > Secrets me billing-enabled GEMINI_API_KEY select karein.',
+                  })
+                );
+              } else if (code !== 1000 && reason) {
+                clientWs.send(
+                  JSON.stringify({
+                    type: 'error',
+                    code,
+                    message: `Gemini Live session band hua (${code}): ${reason}`,
+                  })
+                );
+              }
+              clientWs.close();
+            }
+          },
+        },
+      });
+    } catch (err: any) {
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(
+          JSON.stringify({
+            type: 'error',
+            code: Number(err?.status) || 502,
+            message:
+              err?.message ||
+              'Gemini Live Voice connect nahi ho paya. Kripya Settings > Secrets me GEMINI_API_KEY check karein.',
+          })
+        );
+        clientWs.close();
+      }
+      return;
+    }
+
+    clientWs.on('message', (raw) => {
+      if (!session) return;
+      try {
+        const payload = JSON.parse(raw.toString());
+        if (payload?.audio) {
+          session.sendRealtimeInput({
+            audio: {
+              data: payload.audio,
+              mimeType: 'audio/pcm;rate=16000',
+            },
+          });
+        } else if (payload?.text && typeof payload.text === 'string') {
+          session.sendClientContent({
+            turns: [{ role: 'user', parts: [{ text: payload.text }] }],
+            turnComplete: true,
+          });
+        }
+      } catch {
+        // ignore malformed frames
+      }
+    });
+
+    clientWs.on('close', () => {
+      closedByClient = true;
+      try {
+        session?.close();
+      } catch {
+        // ignore
+      }
+    });
+  });
+
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`JARVIS AI Server running on port ${PORT}`);
   });
 }

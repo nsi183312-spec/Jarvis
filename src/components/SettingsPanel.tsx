@@ -61,14 +61,14 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         </div>
         <div className="text-xs">
           <h3 className="font-semibold text-sm text-cyan-200">
-            Gemini AI Cloud Brain & Offline Engine
+            Gemini AI Cloud Brain &amp; Live Voice Engine
           </h3>
           <p className="text-slate-300 mt-1">
-            JARVIS utilizes our bilingual smart assistant engine for device controls, calculations, and voice conversations.
+            JARVIS uses <strong className="text-cyan-200">Gemini 4 Hydrogen</strong> for Q&amp;A, <strong className="text-cyan-200">Gemini 3.8 Live</strong> for real-time voice conversations, and <strong className="text-cyan-200">Gemini 3.8 TTS</strong> for natural speech.
           </p>
           <div className="mt-2.5 p-2.5 rounded-xl bg-slate-950/80 border border-slate-800 text-[11px] text-slate-300">
             <span className="font-semibold text-cyan-300 block mb-0.5">Tip for Cloud AI Generation:</span>
-            If your Google Cloud project requires a billing-enabled key for live Gemini 3.8 Flash calls, you can configure or select one anytime in the <strong className="text-white">Settings &gt; Secrets</strong> panel.
+            Ensure your billing-enabled <strong className="text-white">GEMINI_API_KEY</strong> is selected in AI Studio&apos;s <strong className="text-white">Settings &gt; Secrets</strong> panel so Live Voice, TTS, and Q&amp;A respond without 403 limits.
           </div>
           {!verifiedIndianFemale && voices.length > 0 && (
             <p className="text-[10px] text-amber-300/90 mt-2">
@@ -130,9 +130,13 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                   className="w-full bg-slate-900 text-xs text-white px-3 py-2 rounded-xl border border-cyan-500/40 focus:outline-none focus:border-cyan-400"
                 >
                   {cloudVoices.length === 0 ? (
-                    <option value="ihKwLOjVUMG4lgUI6meZ">
-                      Leo - Curious Character (Custom ID: ihKwLOjVUMG4lgUI6meZ)
-                    </option>
+                    <>
+                      <option value="gemini:Kore">JARVIS Gemini Voice — Kore (Warm Female)</option>
+                      <option value="gemini:Zephyr">JARVIS Gemini Voice — Zephyr (Bright Female)</option>
+                      <option value="ihKwLOjVUMG4lgUI6meZ">
+                        Leo - Curious Character (ElevenLabs ID: ihKwLOjVUMG4lgUI6meZ)
+                      </option>
+                    </>
                   ) : (
                     cloudVoices.map((cv) => (
                       <option key={cv.voice_id} value={cv.voice_id}>
@@ -155,7 +159,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                     type="text"
                     value={settings.elevenLabsVoiceId || 'ihKwLOjVUMG4lgUI6meZ'}
                     onChange={(e) => onUpdateSettings({ elevenLabsVoiceId: e.target.value.trim() })}
-                    placeholder="Enter ElevenLabs Voice ID..."
+                    placeholder="Enter Voice ID or gemini:Kore"
                     className="flex-1 bg-slate-950 text-xs text-cyan-200 px-3 py-1.5 rounded-xl border border-slate-700 focus:outline-none focus:border-cyan-400 font-mono"
                   />
                   <button
@@ -166,11 +170,9 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                     Test ID
                   </button>
                 </div>
-                {(settings.elevenLabsVoiceId || 'ihKwLOjVUMG4lgUI6meZ') === 'ihKwLOjVUMG4lgUI6meZ' && (
-                  <p className="text-[10px] text-amber-300/90 mt-1.5 leading-relaxed">
-                    Note: Voice ID <code>ihKwLOjVUMG4lgUI6meZ</code> (Leo - Curious Character) ek ElevenLabs Library Voice hai. Free API plan par ElevenLabs library voices block hone par server automatically HD Neural fallback (Jessica) play karta hai taaki JARVIS silent na ho; plan upgrade hote hi ye ID direct chalegi.
-                  </p>
-                )}
+                <p className="text-[10px] text-slate-400 mt-1.5 leading-relaxed">
+                  Server automatically uses <strong className="text-cyan-300">Gemini 3.8 TTS</strong> fallback whenever ElevenLabs is unavailable, or select a <code className="text-cyan-300">gemini:Kore</code> / <code className="text-cyan-300">gemini:Zephyr</code> voice directly.
+                </p>
               </div>
             </div>
           )}

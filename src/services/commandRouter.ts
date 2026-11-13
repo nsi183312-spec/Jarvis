@@ -368,6 +368,7 @@ export class CommandRouter {
   }
 
   public buildAppLaunchUrl(app: {
+    key?: string;
     packageName?: string;
     webUrl?: string;
     deepLink?: string;
@@ -377,34 +378,59 @@ export class CommandRouter {
       return fallbackUrl || app.deepLink || undefined;
     }
 
-    // Native phone URI schemes work directly from Android browsers & WebViews
+    // Specific Android OS standard hardware/system intents (works across vivo, Samsung, Pixel, Xiaomi)
+    if (app.key === 'camera') {
+      return 'intent:#Intent;action=android.media.action.STILL_IMAGE_CAMERA;end';
+    }
+    if (app.key === 'calculator') {
+      return 'intent:#Intent;action=android.intent.action.MAIN;category=android.intent.category.APP_CALCULATOR;end';
+    }
+    if (app.key === 'recorder') {
+      return 'intent:#Intent;action=android.provider.MediaStore.RECORD_SOUND;end';
+    }
+    if (app.key === 'settings') {
+      return 'intent:#Intent;action=android.settings.SETTINGS;end';
+    }
+    if (app.key === 'maps') {
+      return 'geo:0,0?q=';
+    }
+
+    // Native phone URI schemes work directly without Chrome tabs
     if (fallbackUrl && /^(tel:|sms:|market:|geo:)/i.test(fallbackUrl)) {
       return fallbackUrl;
     }
-    if (app.deepLink && /^(tel:|sms:|market:)/i.test(app.deepLink)) {
+    if (app.deepLink && /^(tel:|sms:|market:|geo:)/i.test(app.deepLink)) {
       return app.deepLink;
     }
 
-    const fallbackParam =
-      fallbackUrl && /^https?:\/\//i.test(fallbackUrl)
-        ? `S.browser_fallback_url=${encodeURIComponent(fallbackUrl)};`
-        : '';
-
-    // Prefer declared custom scheme on Android (opens real installed WhatsApp/Instagram/Telegram/MyJio/Snapchat/Spotify/Pinterest)
+    // Prefer native custom app schemes on Android (no Chrome https fallback)
     if (app.deepLink && app.deepLink.includes('://') && app.packageName) {
       const idx = app.deepLink.indexOf('://');
       const scheme = app.deepLink.slice(0, idx);
       const hostPath = app.deepLink.slice(idx + 3);
-      return `intent://${hostPath}#Intent;scheme=${scheme};package=${app.packageName};${fallbackParam}end`;
+      return `intent://${hostPath}#Intent;scheme=${scheme};package=${app.packageName};end`;
     }
 
-    // Otherwise use HTTPS App Link with explicit target package (opens YouTube, Maps, Meet, Photos, Gmail directly in app)
-    if (fallbackUrl && fallbackUrl.startsWith('https://') && app.packageName) {
+    // Strict HTTPS App Links targeting explicit installed package (no Chrome web tab fallback)
+    if (
+      fallbackUrl &&
+      fallbackUrl.startsWith('https://') &&
+      app.packageName &&
+      (app.key === 'youtube' ||
+        app.key === 'meet' ||
+        app.key === 'photos' ||
+        app.key === 'gmail')
+    ) {
       const hostPath = fallbackUrl.slice(8);
-      return `intent://${hostPath}#Intent;scheme=https;package=${app.packageName};${fallbackParam}end`;
+      return `intent://${hostPath}#Intent;scheme=https;package=${app.packageName};end`;
     }
 
-    return fallbackUrl;
+    // Launcher intent for vendor/installed phone apps (vivo Notes, Music, MovieBox+, Safety, etc.)
+    if (app.packageName) {
+      return `intent:#Intent;action=android.intent.action.MAIN;category=android.intent.category.LAUNCHER;package=${app.packageName};end`;
+    }
+
+    return undefined;
   }
 
   public buildDeepIntentUrl(
@@ -415,17 +441,24 @@ export class CommandRouter {
     if (!this.isAndroidDevice()) {
       return httpsUrl;
     }
-    const fallbackParam = `S.browser_fallback_url=${encodeURIComponent(httpsUrl)};`;
+    if (customSchemeUrl && /^(geo:|tel:|sms:|market:)/i.test(customSchemeUrl)) {
+      return customSchemeUrl;
+    }
     if (customSchemeUrl && customSchemeUrl.includes('://')) {
       const idx = customSchemeUrl.indexOf('://');
       const scheme = customSchemeUrl.slice(0, idx);
       const hostPath = customSchemeUrl.slice(idx + 3);
-      return `intent://${hostPath}#Intent;scheme=${scheme};package=${packageName};${fallbackParam}end`;
+      return `intent://${hostPath}#Intent;scheme=${scheme};package=${packageName};end`;
     }
     if (httpsUrl.startsWith('https://')) {
-      return `intent://${httpsUrl.slice(8)}#Intent;scheme=https;package=${packageName};${fallbackParam}end`;
+      return `intent://${httpsUrl.slice(8)}#Intent;scheme=https;package=${packageName};end`;
     }
     return httpsUrl;
+  }
+
+  private buildAndroidSettingsIntent(action: string): string | undefined {
+    if (!this.isAndroidDevice() || this.hasNativeAndroidBridge()) return undefined;
+    return `intent:#Intent;action=${action};end`;
   }
 
   public async toggleFlashlight(on: boolean): Promise<boolean> {
@@ -590,54 +623,83 @@ export class CommandRouter {
     if (asksMobileData && !query.includes('date')) {
       if (isTurnOn) {
         const bridged = this.triggerAndroidBridge('mobile_data', true);
+        const panelIntent = this.buildAndroidSettingsIntent('android.settings.panel.action.INTERNET_CONNECTIVITY');
         return {
           handled: true,
           reply: bridged
-            ? 'Ji! Mobile Data on kar diya hai.'
-            : 'Mobile Data ON kar diya hai! (Phone ke system SIM data toggle ke liye JARVIS Android APK me Quick Settings bridge active hota hai.)',
+            ? 'Ji! Mobile Data phone me on kar diya hai.'
+            : 'Phone ka Internet / Mobile Data panel khol rahi hoon — yahan se real Mobile Data ON karein!',
           actionType: 'mobile_data_on',
           deviceStateUpdate: { mobileDataEnabled: true },
+          externalUrl: panelIntent,
+          externalLabel: panelIntent ? 'Open Phone Internet Panel' : undefined,
         };
       }
       if (isTurnOff) {
         const bridged = this.triggerAndroidBridge('mobile_data', false);
+        const panelIntent = this.buildAndroidSettingsIntent('android.settings.panel.action.INTERNET_CONNECTIVITY');
         return {
           handled: true,
           reply: bridged
-            ? 'Mobile Data band kar diya gaya hai.'
-            : 'Mobile Data OFF kar diya hai.',
+            ? 'Phone ka Mobile Data band kar diya gaya hai.'
+            : 'Phone ka Internet / Mobile Data panel khol rahi hoon — yahan se real Mobile Data OFF karein!',
           actionType: 'mobile_data_off',
           deviceStateUpdate: { mobileDataEnabled: false },
+          externalUrl: panelIntent,
+          externalLabel: panelIntent ? 'Open Phone Internet Panel' : undefined,
         };
       }
       if (query.includes('setting') || query.includes('open')) {
-        this.triggerAndroidBridge('open_data_settings');
+        const bridged = this.triggerAndroidBridge('open_data_settings');
+        const panelIntent = bridged
+          ? undefined
+          : this.buildAndroidSettingsIntent('android.settings.DATA_ROAMING_SETTINGS');
         return {
           handled: true,
-          reply: 'Mobile Data & Network Settings open kar rahi hoon!',
+          reply: 'Phone ki Mobile Data & Network Settings open kar rahi hoon!',
           actionType: 'open_data_settings',
+          externalUrl: panelIntent,
+          externalLabel: panelIntent ? 'Open Phone Data Settings' : undefined,
         };
       }
     }
 
     // 1C. HOTSPOT & AIRPLANE MODE
-    if (query.includes('hotspot') && (isTurnOn || isTurnOff)) {
-      this.triggerAndroidBridge('hotspot', isTurnOn);
+    if (query.includes('hotspot') && (isTurnOn || isTurnOff || query.includes('setting') || query.includes('open'))) {
+      const bridged = this.triggerAndroidBridge('hotspot', isTurnOn);
+      const panelIntent = bridged
+        ? undefined
+        : this.buildAndroidSettingsIntent('android.settings.WIRELESS_SETTINGS');
       return {
         handled: true,
-        reply: isTurnOn ? 'Hotspot ON kar diya hai!' : 'Hotspot band kar diya hai.',
+        reply: bridged
+          ? isTurnOn
+            ? 'Hotspot ON kar diya hai!'
+            : 'Hotspot band kar diya hai.'
+          : 'Phone ki Hotspot & Tethering Settings open kar rahi hoon!',
         actionType: isTurnOn ? 'hotspot_on' : 'hotspot_off',
         deviceStateUpdate: { hotspotEnabled: isTurnOn },
+        externalUrl: panelIntent,
+        externalLabel: panelIntent ? 'Open Phone Hotspot Settings' : undefined,
       };
     }
 
-    if ((query.includes('airplane mode') || query.includes('flight mode')) && (isTurnOn || isTurnOff)) {
-      this.triggerAndroidBridge('airplane_mode', isTurnOn);
+    if ((query.includes('airplane mode') || query.includes('flight mode')) && (isTurnOn || isTurnOff || query.includes('setting') || query.includes('open'))) {
+      const bridged = this.triggerAndroidBridge('airplane_mode', isTurnOn);
+      const panelIntent = bridged
+        ? undefined
+        : this.buildAndroidSettingsIntent('android.settings.AIRPLANE_MODE_SETTINGS');
       return {
         handled: true,
-        reply: isTurnOn ? 'Airplane Mode ON kar diya hai.' : 'Airplane Mode OFF kar diya hai.',
+        reply: bridged
+          ? isTurnOn
+            ? 'Airplane Mode ON kar diya hai.'
+            : 'Airplane Mode OFF kar diya hai.'
+          : 'Phone ki Airplane Mode settings open kar rahi hoon!',
         actionType: isTurnOn ? 'airplane_on' : 'airplane_off',
         deviceStateUpdate: { airplaneMode: isTurnOn },
+        externalUrl: panelIntent,
+        externalLabel: panelIntent ? 'Open Phone Airplane Settings' : undefined,
       };
     }
 
@@ -653,18 +715,25 @@ export class CommandRouter {
         : isTurnOff
         ? false
         : true;
-      this.triggerAndroidBridge('dnd', targetDnd);
+      const bridged = this.triggerAndroidBridge('dnd', targetDnd);
+      const panelIntent = bridged
+        ? undefined
+        : this.buildAndroidSettingsIntent('android.settings.NOTIFICATION_POLICY_ACCESS_SETTINGS');
       return {
         handled: true,
-        reply: targetDnd
-          ? 'Do Not Disturb (Silent Mode) ON kar diya hai!'
-          : 'Do Not Disturb (Silent Mode) OFF kar diya hai.',
+        reply: bridged
+          ? targetDnd
+            ? 'Phone ko Silent / DND mode par kar diya hai!'
+            : 'Phone ka Silent / DND mode OFF kar diya hai.'
+          : 'Phone ki Do Not Disturb (DND) settings open kar rahi hoon!',
         actionType: targetDnd ? 'dnd_on' : 'dnd_off',
         deviceStateUpdate: { dndEnabled: targetDnd },
+        externalUrl: panelIntent,
+        externalLabel: panelIntent ? 'Open Phone DND Settings' : undefined,
         apiMapping: {
           intent: 'android.app.NotificationManager.INTERRUPTION_FILTER_NONE',
-          mode: 'simulator-mock',
-          webApi: 'Device Notification Filter Simulator',
+          mode: bridged ? 'android-bridge' : 'web-api',
+          webApi: 'Android Notification Policy Intent',
           state: { dndEnabled: targetDnd },
         },
       };
@@ -672,42 +741,45 @@ export class CommandRouter {
 
     // 2. VOLUME & BRIGHTNESS
     if (query.includes('volume') || query.includes('awaaz')) {
+      const volumePanel = this.buildAndroidSettingsIntent('android.settings.panel.action.VOLUME');
       if (query.includes('up') || query.includes('badhao') || query.includes('tez') || query.includes('high')) {
         const newVol = Math.min(100, currentDeviceState.volume + 15);
+        const bridged = this.triggerAndroidBridge('volume', newVol);
         return {
           handled: true,
-          reply: `Volume badha kar ${newVol}% kar diya hai.`,
+          reply: bridged ? `Phone volume badha kar ${newVol}% kar diya hai.` : 'Phone ka Volume control panel khol rahi hoon!',
           actionType: 'volume_up',
           deviceStateUpdate: { volume: newVol },
+          externalUrl: bridged ? undefined : volumePanel,
+          externalLabel: !bridged && volumePanel ? 'Open Phone Volume' : undefined,
         };
       }
       if (query.includes('down') || query.includes('kam') || query.includes('dhime') || query.includes('mute')) {
         const newVol = query.includes('mute') ? 0 : Math.max(0, currentDeviceState.volume - 15);
+        const bridged = this.triggerAndroidBridge('volume', newVol);
         return {
           handled: true,
-          reply: `Volume ${newVol}% kar diya hai.`,
+          reply: bridged ? `Phone volume ${newVol}% kar diya hai.` : 'Phone ka Volume control panel khol rahi hoon!',
           actionType: 'volume_down',
           deviceStateUpdate: { volume: newVol },
+          externalUrl: bridged ? undefined : volumePanel,
+          externalLabel: !bridged && volumePanel ? 'Open Phone Volume' : undefined,
         };
       }
       const match = query.match(/(\d+)\s*%?/);
       if (match) {
         const vol = Math.min(100, Math.max(0, parseInt(match[1], 10)));
+        const bridged = this.triggerAndroidBridge('volume', vol);
         return {
           handled: true,
-          reply: `Volume ${vol}% par set kar diya hai.`,
+          reply: bridged ? `Phone volume ${vol}% par set kar diya hai.` : 'Phone ka Volume control panel khol rahi hoon!',
           actionType: 'volume_set',
           deviceStateUpdate: { volume: vol },
+          externalUrl: bridged ? undefined : volumePanel,
+          externalLabel: !bridged && volumePanel ? 'Open Phone Volume' : undefined,
         };
       }
     }
-
-    const applyScreenBrightnessSimulation = (percent: number) => {
-      if (typeof document !== 'undefined' && document.documentElement) {
-        document.documentElement.style.setProperty('--jarvis-screen-brightness', `${percent}%`);
-      }
-      this.triggerAndroidBridge('brightness', percent);
-    };
 
     if (
       query.includes('brightness') ||
@@ -750,18 +822,23 @@ export class CommandRouter {
       }
 
       if (nextB !== null) {
-        applyScreenBrightnessSimulation(nextB);
+        const bridged = this.triggerAndroidBridge('brightness', nextB);
+        const displayIntent = bridged
+          ? undefined
+          : this.buildAndroidSettingsIntent('android.settings.DISPLAY_SETTINGS');
         return {
           handled: true,
-          reply: `Screen brightness ${nextB}% par set kar di hai.`,
+          reply: bridged
+            ? `Phone ki real screen brightness ${nextB}% par set kar di hai!`
+            : 'Phone ki Display Brightness settings open kar rahi hoon!',
           actionType,
           deviceStateUpdate: { brightness: nextB },
+          externalUrl: displayIntent,
+          externalLabel: displayIntent ? 'Open Phone Brightness' : undefined,
           apiMapping: {
-            intent: 'android.settings.DISPLAY_BRIGHTNESS',
-            mode: (typeof window !== 'undefined' && (window as any)?.JarvisAndroid)
-              ? 'android-bridge'
-              : 'simulator-mock',
-            webApi: 'CSS Viewport Brightness Filter & --jarvis-screen-brightness',
+            intent: 'android.settings.DISPLAY_SETTINGS',
+            mode: bridged ? 'android-bridge' : 'web-api',
+            webApi: 'Android System Display Brightness',
             state: { brightness: nextB },
           },
         };
@@ -802,30 +879,44 @@ export class CommandRouter {
 
       if (targetWifi !== null) {
         const bridged = this.triggerAndroidBridge('wifi', targetWifi);
+        const wifiIntent = bridged
+          ? undefined
+          : this.buildAndroidSettingsIntent('android.settings.panel.action.WIFI');
         const netInfo =
           typeof navigator !== 'undefined' ? (navigator as any).connection : undefined;
         return {
           handled: true,
-          reply: targetWifi ? 'Wi-Fi on kar diya gaya hai!' : 'Wi-Fi band kar diya hai.',
+          reply: bridged
+            ? targetWifi
+              ? 'Phone ka Wi-Fi on kar diya gaya hai!'
+              : 'Phone ka Wi-Fi band kar diya hai.'
+            : 'Phone ka real Wi-Fi control panel khol rahi hoon!',
           actionType: targetWifi ? 'wifi_on' : 'wifi_off',
           deviceStateUpdate: { wifiEnabled: targetWifi },
+          externalUrl: wifiIntent,
+          externalLabel: wifiIntent ? 'Open Phone Wi-Fi Panel' : undefined,
           apiMapping: {
             intent: 'android.settings.panel.ACTION_WIFI',
             mode: bridged ? 'android-bridge' : netInfo ? 'web-api' : 'simulator-mock',
-            webApi: 'navigator.connection (Network Information API) + Wi-Fi Simulator',
+            webApi: 'Android Wi-Fi Settings Panel',
             state: {
               wifiEnabled: targetWifi,
-              effectiveType: netInfo?.effectiveType || 'simulated',
+              effectiveType: netInfo?.effectiveType || 'android-panel',
             },
           },
         };
       }
       if (query.includes('setting') || query.includes('open') || query.includes('kholo')) {
-        this.triggerAndroidBridge('open_wifi_settings');
+        const bridged = this.triggerAndroidBridge('open_wifi_settings');
+        const wifiSettingsIntent = bridged
+          ? undefined
+          : this.buildAndroidSettingsIntent('android.settings.WIFI_SETTINGS');
         return {
           handled: true,
-          reply: 'Wi-Fi Settings open kar rahi hoon!',
+          reply: 'Phone ki Wi-Fi Settings open kar rahi hoon!',
           actionType: 'open_wifi_settings',
+          externalUrl: wifiSettingsIntent,
+          externalLabel: wifiSettingsIntent ? 'Open Phone Wi-Fi Settings' : undefined,
         };
       }
     }
@@ -841,6 +932,9 @@ export class CommandRouter {
 
       if (targetBt !== null) {
         const bridged = this.triggerAndroidBridge('bluetooth', targetBt);
+        const btIntent = bridged
+          ? undefined
+          : this.buildAndroidSettingsIntent('android.settings.BLUETOOTH_SETTINGS');
         let btAvailable: boolean | undefined;
         try {
           if (typeof navigator !== 'undefined' && (navigator as any).bluetooth?.getAvailability) {
@@ -851,9 +945,15 @@ export class CommandRouter {
         }
         return {
           handled: true,
-          reply: targetBt ? 'Bluetooth on ho gaya hai!' : 'Bluetooth band kar diya hai.',
+          reply: bridged
+            ? targetBt
+              ? 'Bluetooth on ho gaya hai!'
+              : 'Bluetooth band kar diya hai.'
+            : 'Phone ki Bluetooth Settings open kar rahi hoon!',
           actionType: targetBt ? 'bluetooth_on' : 'bluetooth_off',
           deviceStateUpdate: { bluetoothEnabled: targetBt },
+          externalUrl: btIntent,
+          externalLabel: btIntent ? 'Open Phone Bluetooth' : undefined,
           apiMapping: {
             intent: 'android.bluetooth.adapter.action.REQUEST_ENABLE',
             mode: bridged
@@ -861,36 +961,58 @@ export class CommandRouter {
               : btAvailable !== undefined
               ? 'web-api'
               : 'simulator-mock',
-            webApi: 'navigator.bluetooth.getAvailability() + Bluetooth Simulator',
+            webApi: 'Android Bluetooth Settings Intent',
             state: { bluetoothEnabled: targetBt, adapterAvailable: btAvailable ?? false },
           },
         };
       }
       if (query.includes('setting') || query.includes('open') || query.includes('kholo')) {
-        this.triggerAndroidBridge('open_bluetooth_settings');
+        const bridged = this.triggerAndroidBridge('open_bluetooth_settings');
+        const btIntent = bridged
+          ? undefined
+          : this.buildAndroidSettingsIntent('android.settings.BLUETOOTH_SETTINGS');
         return {
           handled: true,
-          reply: 'Bluetooth Settings open kar rahi hoon!',
+          reply: 'Phone ki Bluetooth Settings open kar rahi hoon!',
           actionType: 'open_bluetooth_settings',
+          externalUrl: btIntent,
+          externalLabel: btIntent ? 'Open Phone Bluetooth' : undefined,
         };
       }
     }
 
     if (
       query.includes('setting') &&
+      !query.includes('jarvis') &&
       (query.includes('display') ||
         query.includes('sound') ||
         query.includes('accessibility') ||
         query.includes('storage') ||
         query.includes('network') ||
-        query.includes('app'))
+        query.includes('phone'))
     ) {
-      this.triggerAndroidBridge('open_sub_settings', query);
+      const bridged = this.triggerAndroidBridge('open_sub_settings', query);
+      const settingsAction = query.includes('display')
+        ? 'android.settings.DISPLAY_SETTINGS'
+        : query.includes('sound')
+        ? 'android.settings.SOUND_SETTINGS'
+        : query.includes('accessibility')
+        ? 'android.settings.ACCESSIBILITY_SETTINGS'
+        : query.includes('storage')
+        ? 'android.settings.INTERNAL_STORAGE_SETTINGS'
+        : query.includes('network')
+        ? 'android.settings.WIRELESS_SETTINGS'
+        : 'android.settings.SETTINGS';
+      const settingsIntent = bridged ? undefined : this.buildAndroidSettingsIntent(settingsAction);
       return {
         handled: true,
-        reply: 'Phone & App Settings open kar rahi hoon!',
+        reply: 'Phone Settings open kar rahi hoon!',
         actionType: 'open_sub_settings',
-        uiAction: { tab: 'settings', settingsSection: 'general' },
+        externalUrl: settingsIntent,
+        externalLabel: settingsIntent ? 'Open Phone Settings' : undefined,
+        uiAction: !this.isAndroidDevice()
+          ? { tab: 'settings', settingsSection: 'general' }
+          : undefined,
       };
     }
 
@@ -1209,12 +1331,14 @@ export class CommandRouter {
       const bridged = this.triggerAndroidBridge('open_app', 'com.movieboxpro.android');
       return {
         handled: true,
-        reply: `MovieBox+ me "${movieName}" search kar rahi hoon!`,
+        reply: `MovieBox+ phone app open kar rahi hoon (${movieName})!`,
         actionType: 'moviebox_search',
         externalUrl: bridged
           ? undefined
+          : this.isAndroidDevice()
+          ? 'intent:#Intent;action=android.intent.action.MAIN;category=android.intent.category.LAUNCHER;package=com.movieboxpro.android;end'
           : `https://www.google.com/search?q=${encodeURIComponent(movieName + ' movie')}`,
-        externalLabel: 'Open MovieBox Search',
+        externalLabel: 'Open MovieBox+ on Phone',
       };
     }
 
@@ -1233,9 +1357,9 @@ export class CommandRouter {
       };
     }
 
-    // Weather Quick Check (reads cached local WeatherWidget data if available + opens report)
+    // Weather Quick Check (reads cached local WeatherWidget data if available + opens Phone Weather App on Android)
     if (query.includes('weather') || query.includes('mausam')) {
-      let localWeatherReply = 'Aaj ka live Weather report open kar rahi hoon!';
+      let localWeatherReply = 'Phone ka Weather app open kar rahi hoon!';
       try {
         const cached = typeof localStorage !== 'undefined' ? localStorage.getItem('jarvis_weather_cache_v1') : null;
         if (cached) {
@@ -1247,16 +1371,21 @@ export class CommandRouter {
       } catch {
         // ignore storage errors
       }
+      const bridged = this.triggerAndroidBridge('open_app', 'com.vivo.weather');
       return {
         handled: true,
         reply: localWeatherReply,
         actionType: 'weather_check',
-        externalUrl: 'https://www.google.com/search?q=weather+today',
-        externalLabel: 'Open Weather',
+        externalUrl: bridged
+          ? undefined
+          : this.isAndroidDevice()
+          ? 'intent:#Intent;action=android.intent.action.MAIN;category=android.intent.category.LAUNCHER;package=com.vivo.weather;end'
+          : 'https://www.google.com/search?q=weather+today',
+        externalLabel: this.isAndroidDevice() ? 'Open Weather App' : 'Open Weather',
       };
     }
 
-    // Google / Web Search ("search <query>", "google <query>", "<query> search karo")
+    // Google App / Web Search ("search <query>", "google <query>", "<query> search karo")
     if (
       (query.startsWith('search ') || query.startsWith('google ') || query.includes('search karo')) &&
       !query.includes('youtube') &&
@@ -1269,86 +1398,119 @@ export class CommandRouter {
         /\b(google|search|karo|par|for|about|on)\b/gi
       );
       if (searchTerm) {
+        const googleSearchUrl = `https://www.google.com/search?q=${encodeURIComponent(searchTerm)}`;
+        const bridged = this.triggerAndroidBridge('open_url', googleSearchUrl);
         return {
           handled: true,
-          reply: `Google par "${searchTerm}" search kar rahi hoon!`,
+          reply: `Google app par "${searchTerm}" search kar rahi hoon!`,
           actionType: 'google_search',
-          externalUrl: `https://www.google.com/search?q=${encodeURIComponent(searchTerm)}`,
-          externalLabel: `Search "${searchTerm}"`,
+          externalUrl: bridged
+            ? undefined
+            : this.isAndroidDevice()
+            ? this.buildDeepIntentUrl(googleSearchUrl, 'com.google.android.googlequicksearchbox')
+            : googleSearchUrl,
+          externalLabel: `Search "${searchTerm}" on Phone`,
         };
       }
     }
 
     // 6. ACCESSIBILITY IN-APP AUTOMATIONS (Scroll, Click, Type, Screenshot, Navigation)
+    const isAndroid = this.isAndroidDevice();
     if (query.includes('scroll down') || query.includes('niche scroll') || query.includes('niche jao')) {
-      this.triggerAndroidBridge('scroll_down');
+      const bridged = this.triggerAndroidBridge('scroll_down');
       return {
         handled: true,
-        reply: 'Screen par niche scroll kar diya hai!',
+        reply: bridged
+          ? 'Phone screen par niche scroll kar diya hai!'
+          : isAndroid
+          ? 'Phone ke kisi bhi app par scroll karne ke liye Settings → 04 APK Download se JARVIS APK install karke Accessibility ON karein.'
+          : 'Screen par niche scroll kar diya hai!',
         actionType: 'scroll_down',
-        uiAction: { scrollDelta: 340 },
+        uiAction: !isAndroid ? { scrollDelta: 340 } : undefined,
       };
     }
     if (query.includes('scroll up') || query.includes('upar scroll') || query.includes('upar jao')) {
-      this.triggerAndroidBridge('scroll_up');
+      const bridged = this.triggerAndroidBridge('scroll_up');
       return {
         handled: true,
-        reply: 'Screen par upar scroll kar diya hai!',
+        reply: bridged
+          ? 'Phone screen par upar scroll kar diya hai!'
+          : isAndroid
+          ? 'Phone ke kisi bhi app par scroll karne ke liye Settings → 04 APK Download se JARVIS APK install karke Accessibility ON karein.'
+          : 'Screen par upar scroll kar diya hai!',
         actionType: 'scroll_up',
-        uiAction: { scrollDelta: -340 },
+        uiAction: !isAndroid ? { scrollDelta: -340 } : undefined,
       };
     }
     if (query.startsWith('click ') || query.startsWith('dabao ') || query.includes('par click karo')) {
       const btnText = query.replace(/^(click|dabao)\s+/i, '').replace(/\s*par click karo/i, '').trim();
-      this.triggerAndroidBridge('click', btnText);
+      const bridged = this.triggerAndroidBridge('click', btnText);
       return {
         handled: true,
-        reply: `Screen par "${btnText}" element click kar diya hai!`,
+        reply: bridged
+          ? `Phone screen par "${btnText}" click kar diya hai!`
+          : `Phone screen par "${btnText}" click karne ke liye Settings → 04 APK Download se JARVIS APK + Accessibility ON karein.`,
         actionType: 'accessibility_click',
       };
     }
     if (query.startsWith('type ') || query.startsWith('likho ')) {
       const typed = query.replace(/^(type|likho)\s+/i, '').trim();
-      this.triggerAndroidBridge('type', typed);
+      const bridged = this.triggerAndroidBridge('type', typed);
       return {
         handled: true,
-        reply: `Active input box me "${typed}" type kar diya hai!`,
+        reply: bridged
+          ? `Phone ke active input box me "${typed}" type kar diya hai!`
+          : `Phone ke kisi bhi app me "${typed}" type karne ke liye JARVIS APK + Accessibility ON karein.`,
         actionType: 'accessibility_type',
       };
     }
     if (query.includes('screenshot') || query.includes('screen capture')) {
-      this.triggerAndroidBridge('screenshot');
+      const bridged = this.triggerAndroidBridge('screenshot');
       return {
         handled: true,
-        reply: 'Screenshot capture command bhej diya hai!',
+        reply: bridged
+          ? 'Phone ka screenshot capture kar liya gaya hai!'
+          : 'Phone screenshot capture ke liye JARVIS APK (Settings → 04 APK Download) install karke Accessibility enable karein.',
         actionType: 'take_screenshot',
       };
     }
     if (query === 'go home' || query === 'home screen' || query === 'ghar jao' || query === 'open home') {
-      this.triggerAndroidBridge('go_home');
+      const bridged = this.triggerAndroidBridge('go_home');
       return {
         handled: true,
-        reply: 'Home screen par aa gaye hain!',
+        reply: bridged
+          ? 'Phone ki Home Screen par aa gaye hain!'
+          : isAndroid
+          ? 'Phone ki Home screen par jaane ke liye JARVIS APK + Accessibility Service ON karein.'
+          : 'Home screen par aa gaye hain!',
         actionType: 'go_home',
-        uiAction: { tab: 'assistant' },
+        uiAction: !isAndroid ? { tab: 'assistant' } : undefined,
       };
     }
     if (query === 'go back' || query === 'back' || query === 'piche jao') {
-      this.triggerAndroidBridge('go_back');
+      const bridged = this.triggerAndroidBridge('go_back');
       return {
         handled: true,
-        reply: 'Piche / Back kar diya hai.',
+        reply: bridged
+          ? 'Phone me Back kar diya hai.'
+          : isAndroid
+          ? 'Phone me Back navigation chalane ke liye JARVIS APK + Accessibility Service ON karein.'
+          : 'Piche / Back kar diya hai.',
         actionType: 'go_back',
-        uiAction: { tab: 'assistant' },
+        uiAction: !isAndroid ? { tab: 'assistant' } : undefined,
       };
     }
     if (query.includes('recent apps') || query === 'recents') {
-      this.triggerAndroidBridge('recents');
+      const bridged = this.triggerAndroidBridge('recents');
       return {
         handled: true,
-        reply: 'Recent & All Apps drawer open kar rahi hoon!',
+        reply: bridged
+          ? 'Phone ke Recent Apps open kar diye hain!'
+          : isAndroid
+          ? 'Phone ke Recent Apps kholne ke liye JARVIS APK + Accessibility Service ON karein.'
+          : 'Recent & All Apps drawer open kar rahi hoon!',
         actionType: 'open_recents',
-        uiAction: { tab: 'features', featuresSubTab: 'apps' },
+        uiAction: !isAndroid ? { tab: 'features', featuresSubTab: 'apps' } : undefined,
       };
     }
 
@@ -1416,11 +1578,19 @@ export class CommandRouter {
         enabled: true,
         days: ['Daily'],
       };
+      const bridged = this.triggerAndroidBridge('alarm', timeLabel);
+      const alarmIntent = bridged
+        ? undefined
+        : this.buildAndroidSettingsIntent('android.intent.action.SET_ALARM');
       return {
         handled: true,
-        reply: `Alarm ${timeLabel} ke liye set kar diya hai!`,
+        reply: bridged
+          ? `Phone Clock me ${timeLabel} ka alarm set kar diya hai!`
+          : `Phone ka Clock Alarm app ${timeLabel} ke liye khol rahi hoon!`,
         actionType: 'set_alarm',
         alarmCreated: newAlarm,
+        externalUrl: alarmIntent,
+        externalLabel: alarmIntent ? `Set ${timeLabel} Alarm on Phone` : undefined,
       };
     }
 
@@ -1513,7 +1683,7 @@ export class CommandRouter {
               reply: `${cApp.name} app phone me open kar rahi hoon!`,
               actionType: `open_custom_${cLower}`,
               externalUrl: launchUrl,
-              externalLabel: launchUrl ? `Open ${cApp.name} App` : undefined,
+              externalLabel: launchUrl ? `Open ${cApp.name} on Phone` : undefined,
             };
           }
         }
@@ -1532,10 +1702,10 @@ export class CommandRouter {
         const bridged = this.triggerAndroidBridge('open_app', app.packageName);
         const launchUrl = bridged ? undefined : this.buildAppLaunchUrl(app);
 
-        // Inside native APK bridge, the real Android app opens directly;
-        // in web/browser mode, provide interactive modals for Camera/Calculator/Recorder/Safety & Settings
+        // On Android phones NEVER open JARVIS's own built-in clone modals/settings;
+        // launch the real phone app instead. Keep web modals only for Desktop browsers.
         let uiAction: CommandUiAction | undefined;
-        if (!bridged) {
+        if (!bridged && !this.isAndroidDevice()) {
           if (app.key === 'calculator') {
             uiAction = { modal: 'calculator' };
           } else if (app.key === 'camera') {
@@ -1571,7 +1741,6 @@ export class CommandRouter {
 
       if (appNameRaw) {
         const bridged = this.triggerAndroidBridge('open_app_name', appNameRaw);
-        const storeSearch = `https://play.google.com/store/search?q=${encodeURIComponent(appNameRaw)}&c=apps`;
         return {
           handled: true,
           reply: `Aapke phone me ${appNameRaw} app open kar rahi hoon!`,
@@ -1579,13 +1748,9 @@ export class CommandRouter {
           externalUrl: bridged
             ? undefined
             : this.isAndroidDevice()
-            ? this.buildDeepIntentUrl(
-                storeSearch,
-                'com.android.vending',
-                `market://search?q=${encodeURIComponent(appNameRaw)}&c=apps`
-              )
+            ? `market://search?q=${encodeURIComponent(appNameRaw)}&c=apps`
             : `https://www.google.com/search?q=${encodeURIComponent(appNameRaw + ' app')}`,
-          externalLabel: `Find ${appNameRaw} on Phone`,
+          externalLabel: `Open ${appNameRaw} on Phone`,
         };
       }
     }

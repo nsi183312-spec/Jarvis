@@ -452,13 +452,20 @@ export class VoiceEngine {
           this.listeningMode === 'speech-api' &&
           (this.isWakeWordMode || (this.noSpeechRestartCount > 0 && this.noSpeechRestartCount <= 1))
         ) {
-          try {
-            rec.lang = this.activeLang;
-            rec.start();
-            return;
-          } catch {
-            // Fall through to idle cleanly
-          }
+          setTimeout(() => {
+            if (!this.isListening || this.listeningMode !== 'speech-api') return;
+            try {
+              rec.lang = this.activeLang;
+              rec.start();
+            } catch {
+              this.isListening = false;
+              this.stopListeningWaveformLoop();
+              if (!this.isSpeaking) {
+                this.onStateChange('idle');
+              }
+            }
+          }, 150);
+          return;
         }
 
         this.isListening = false;
@@ -783,10 +790,20 @@ export class VoiceEngine {
     this.stopListeningWaveformLoop();
     if (!stoppingRecorder) {
       this.onStatusDetailCallback('');
+      if (!this.isSpeaking) {
+        this.onStateChange('idle');
+      }
+    } else {
+      this.onStatusDetailCallback('Awaaz process ho rahi hai...');
     }
-    if (!this.isSpeaking) {
-      this.onStateChange('idle');
-    }
+  }
+
+  public isAudioRecorderActive(): boolean {
+    return (
+      this.listeningMode === 'audio-recorder' &&
+      Boolean(this.mediaRecorder) &&
+      this.mediaRecorder?.state !== 'inactive'
+    );
   }
 
   public getAvailableVoices(): SpeechSynthesisVoice[] {
@@ -913,7 +930,7 @@ export class VoiceEngine {
 
     const fetchTimeout = setTimeout(() => {
       controller.abort();
-    }, 6500);
+    }, 12000);
 
     try {
       const resp = await fetch('/api/tts', {
