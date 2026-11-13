@@ -18,7 +18,12 @@ import {
   Music,
   Store,
   Image as ImageIcon,
+  ShieldCheck,
+  Mail,
+  Lock,
+  CheckCircle2,
 } from 'lucide-react';
+import { androidBridge, DiscoveredAndroidApp } from '../services/androidBridge';
 
 export interface AppDefinition {
   id: string;
@@ -98,19 +103,49 @@ export const AppAutomationHub: React.FC<AppAutomationHubProps> = ({
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
 
   // In-App Action Builder state
-  const [youtubeQuery, setYoutubeQuery] = useState('Arijit Singh songs');
+  const [youtubeQuery, setYoutubeQuery] = useState('Cricket videos');
   const [whatsappMsg, setWhatsappMsg] = useState('Hello! Main abhi pahunch raha hoon.');
   const [mapDestination, setMapDestination] = useState('Nearest Petrol Pump');
-  const [chromeSearchQuery, setChromeSearchQuery] = useState('Today news Hindi');
+  const [chromeSearchQuery, setChromeSearchQuery] = useState('wikipedia.org');
+  const [gmailRecipient, setGmailRecipient] = useState('');
   const [pinterestQuery, setPinterestQuery] = useState('Aesthetic wallpaper 4k');
   const [storeSearchQuery, setStoreSearchQuery] = useState('WhatsApp');
   const [meetCode, setMeetCode] = useState('');
+
+  // Real Native Android App Discovery & Per-App Permission Controls
+  const discoverySnapshot = androidBridge.getDiscoveredInstalledApps();
+  const [discoveredApps, setDiscoveredApps] = useState<DiscoveredAndroidApp[]>(
+    discoverySnapshot.apps
+  );
+  const [appPermissionsMap, setAppPermissionsMap] = useState<Record<string, boolean>>(() =>
+    androidBridge.getAppPermissionsMap()
+  );
+  const [accessibilityConsented, setAccessibilityConsented] = useState<boolean>(() =>
+    androidBridge.hasAccessibilityUserConsent()
+  );
 
   // Custom App Form
   const [showAddModal, setShowAddModal] = useState(false);
   const [newAppName, setNewAppName] = useState('');
   const [newPackageName, setNewPackageName] = useState('');
   const [newWebUrl, setNewWebUrl] = useState('');
+
+  const handleToggleAppPermission = (e: React.MouseEvent, packageName: string) => {
+    e.stopPropagation();
+    const currentlyAllowed = appPermissionsMap[packageName] !== false;
+    const nextAllowed = !currentlyAllowed;
+    androidBridge.setAppControlAllowed(packageName, nextAllowed);
+    setAppPermissionsMap((prev) => ({ ...prev, [packageName]: nextAllowed }));
+    setDiscoveredApps((prev) =>
+      prev.map((a) => (a.packageName === packageName ? { ...a, isAllowed: nextAllowed } : a))
+    );
+  };
+
+  const handleGrantAccessibilityConsent = () => {
+    androidBridge.setAccessibilityUserConsent(true);
+    setAccessibilityConsented(true);
+    onSpeak('Accessibility assistance permission authorized!');
+  };
 
   const filteredApps = apps.filter((app) => {
     const matchesSearch =
@@ -172,14 +207,18 @@ export const AppAutomationHub: React.FC<AppAutomationHubProps> = ({
           <div>
             <div className="flex items-center gap-2 flex-wrap">
               <h3 className="font-extrabold text-base text-white">
-                All Phone Apps & In-App Automation Hub
+                Android Universal App Control Hub
               </h3>
               <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/20 border border-cyan-400/40 text-cyan-300 font-bold">
-                {apps.length} APPS OPTIMIZED
+                {discoverySnapshot.nativeDiscovery
+                  ? `${discoveredApps.length} REAL INSTALLED APPS`
+                  : `${apps.length} SUPPORTED INTENTS`}
               </span>
             </div>
             <p className="text-xs text-slate-300 mt-1">
-              vivo system apps, Google apps, aur social apps ko voice command se open karein aur basic se advance actions chalayein!
+              {discoverySnapshot.nativeDiscovery
+                ? 'Native Android Bridge connected! PackageManager se phone ke real installed apps discovered hain.'
+                : 'Browser Mode: Standard website phone ke sabhi installed apps scan nahi kar sakti. Supported Android Intents & Native Bridge yahan ready hain.'}
             </p>
           </div>
         </div>
@@ -192,6 +231,83 @@ export const AppAutomationHub: React.FC<AppAutomationHubProps> = ({
           <span>Add Any App</span>
         </button>
       </div>
+
+      {/* WEBSITE vs NATIVE ANDROID CAPABILITY ARCHITECTURE MATRIX */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+        <div className="p-3.5 rounded-2xl bg-slate-900/80 border border-cyan-500/25 space-y-1">
+          <span className="text-[10px] font-bold uppercase tracking-wider text-cyan-300">
+            1. Website Mode (Current)
+          </span>
+          <p className="text-slate-300 text-[11px] leading-relaxed">
+            AI Voice/Chat, ElevenLabs Speech, Offline Math, Deep Links (YouTube, WhatsApp, Maps, Chrome, Dialer, Mailto).
+          </p>
+        </div>
+        <div className="p-3.5 rounded-2xl bg-slate-900/80 border border-emerald-500/25 space-y-1">
+          <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-300">
+            2. Native Android Companion
+          </span>
+          <p className="text-slate-300 text-[11px] leading-relaxed">
+            Real <code className="text-emerald-200">PackageManager</code> Installed App Discovery, zero-tab package launch, Torch, System Volume/Brightness, WebView Bridge.
+          </p>
+        </div>
+        <div className="p-3.5 rounded-2xl bg-slate-900/80 border border-purple-500/25 space-y-1">
+          <span className="text-[10px] font-bold uppercase tracking-wider text-purple-300">
+            3. Individual App Permissions
+          </span>
+          <p className="text-slate-300 text-[11px] leading-relaxed">
+            Per-app JARVIS Allow/Block toggle, explicit Accessibility consent, aur sending/payment actions se pehle User Confirmation.
+          </p>
+        </div>
+      </div>
+
+      {/* REAL NATIVE INSTALLED APPS DISCOVERY LIST (Only shown with real PackageManager data) */}
+      {discoverySnapshot.nativeDiscovery && discoveredApps.length > 0 && (
+        <div className="p-5 rounded-3xl bg-slate-900/80 border border-emerald-500/35 space-y-3">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+              <h4 className="text-xs font-bold text-emerald-200 uppercase tracking-wider">
+                Real Installed Phone Apps ({discoveredApps.length} Discovered via PackageManager)
+              </h4>
+            </div>
+            <span className="text-[10px] text-slate-400">
+              Toggle karein kaunse apps JARVIS control kar sakta hai
+            </span>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5 max-h-64 overflow-y-auto pr-1">
+            {discoveredApps
+              .filter(
+                (a) =>
+                  !searchQuery.trim() ||
+                  a.appName.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                  a.packageName.toLowerCase().includes(searchQuery.toLowerCase())
+              )
+              .map((dApp) => (
+                <div
+                  key={dApp.packageName}
+                  onClick={() => onExecuteCommand(`Open ${dApp.appName}`)}
+                  className="p-2.5 rounded-xl bg-slate-950/75 border border-slate-800 hover:border-cyan-400/40 flex items-center justify-between gap-2 cursor-pointer transition"
+                >
+                  <div className="min-w-0">
+                    <p className="text-xs font-semibold text-white truncate">{dApp.appName}</p>
+                    <p className="text-[10px] text-slate-500 font-mono truncate">{dApp.packageName}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={(e) => handleToggleAppPermission(e, dApp.packageName)}
+                    className={`px-2 py-1 rounded-lg text-[10px] font-bold shrink-0 transition ${
+                      dApp.isAllowed
+                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                        : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                    }`}
+                  >
+                    {dApp.isAllowed ? 'Allowed' : 'Blocked'}
+                  </button>
+                </div>
+              ))}
+          </div>
+        </div>
+      )}
 
       {/* SECTION 1: BASIC TO ADVANCED IN-APP AUTOMATOR */}
       <div className="p-5 rounded-3xl bg-slate-900/80 border border-slate-800 space-y-4">
@@ -350,19 +466,21 @@ export const AppAutomationHub: React.FC<AppAutomationHubProps> = ({
           </div>
         </div>
 
-        {/* Music & Chrome Quick Bar */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5 pt-1">
-          <div className="p-3.5 rounded-2xl bg-slate-950/60 border border-purple-500/30 flex items-center justify-between gap-3">
+        {/* Music, Chrome Website & Gmail Actions */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5 pt-1">
+          <div className="p-3.5 rounded-2xl bg-slate-950/60 border border-purple-500/30 flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
-              <Music className="w-4 h-4 text-purple-400" />
-              <span className="text-xs font-semibold text-white">Music Playback Controls</span>
+              <Music className="w-4 h-4 text-purple-400 shrink-0" />
+              <span className="text-xs font-semibold text-white">Music</span>
             </div>
-            <div className="flex gap-1.5">
-              {['Previous', 'Pause', 'Play', 'Next'].map((action) => (
+            <div className="flex gap-1">
+              {['Prev', 'Pause', 'Play', 'Next'].map((action) => (
                 <button
                   key={action}
-                  onClick={() => onExecuteCommand(`Music ${action.toLowerCase()}`)}
-                  className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-purple-600 text-[11px] font-medium text-slate-200 transition"
+                  onClick={() =>
+                    onExecuteCommand(`Music ${action === 'Prev' ? 'previous' : action.toLowerCase()}`)
+                  }
+                  className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-purple-600 text-[10px] font-medium text-slate-200 transition"
                 >
                   {action}
                 </button>
@@ -376,14 +494,35 @@ export const AppAutomationHub: React.FC<AppAutomationHubProps> = ({
               type="text"
               value={chromeSearchQuery}
               onChange={(e) => setChromeSearchQuery(e.target.value)}
-              placeholder="Search on Chrome..."
-              className="flex-1 bg-slate-900 text-xs text-white px-3 py-1.5 rounded-xl border border-slate-800 focus:outline-none focus:border-blue-500"
+              placeholder="Website (e.g. wikipedia.org)"
+              className="flex-1 bg-slate-900 text-xs text-white px-2.5 py-1.5 rounded-xl border border-slate-800 focus:outline-none focus:border-blue-500"
             />
             <button
-              onClick={() => onExecuteCommand(`Google ${chromeSearchQuery}`)}
-              className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium transition"
+              onClick={() => onExecuteCommand(`Open ${chromeSearchQuery} in Chrome`)}
+              className="px-2.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium transition shrink-0"
             >
-              Google
+              Chrome
+            </button>
+          </div>
+
+          <div className="p-3.5 rounded-2xl bg-slate-950/60 border border-rose-500/30 flex items-center gap-2">
+            <Mail className="w-4 h-4 text-rose-400 shrink-0" />
+            <input
+              type="email"
+              value={gmailRecipient}
+              onChange={(e) => setGmailRecipient(e.target.value)}
+              placeholder="Email address (optional)..."
+              className="flex-1 bg-slate-900 text-xs text-white px-2.5 py-1.5 rounded-xl border border-slate-800 focus:outline-none focus:border-rose-500"
+            />
+            <button
+              onClick={() =>
+                onExecuteCommand(
+                  gmailRecipient.trim() ? `Send email to ${gmailRecipient.trim()}` : 'Compose email in Gmail'
+                )
+              }
+              className="px-2.5 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-medium transition shrink-0"
+            >
+              Gmail
             </button>
           </div>
         </div>
@@ -395,16 +534,26 @@ export const AppAutomationHub: React.FC<AppAutomationHubProps> = ({
           <div className="flex items-center gap-2">
             <MousePointer className="w-4 h-4 text-purple-400" />
             <h4 className="text-xs font-bold text-slate-200 uppercase tracking-wider">
-              Accessibility In-App Screen Automator (Screen Par Kuch Bhi Karein)
+              Optional Accessibility Assistance (Explicit User Permission Required)
             </h4>
           </div>
-          <span className="text-[10px] text-purple-300 bg-purple-500/20 px-2.5 py-0.5 rounded-full font-semibold border border-purple-500/30">
-            Powered by JarvisAccessibilityService
-          </span>
+          {accessibilityConsented ? (
+            <span className="text-[10px] text-emerald-300 bg-emerald-500/20 px-2.5 py-0.5 rounded-full font-semibold border border-emerald-500/30">
+              Authorized by User
+            </span>
+          ) : (
+            <button
+              type="button"
+              onClick={handleGrantAccessibilityConsent}
+              className="text-[10px] text-amber-200 bg-amber-500/20 hover:bg-amber-500/30 px-2.5 py-1 rounded-full font-semibold border border-amber-400/40 transition"
+            >
+              Authorize Accessibility Service
+            </button>
+          )}
         </div>
 
         <p className="text-xs text-slate-400">
-          Android Accessibility API se kisi bhi app ke andar button click, type, scroll ya navigation execute karein:
+          Transparent user-authorized UI assistance: screen scroll, accessible click, Home/Back navigation. Kabhi bhi OTP, lock screen ya login security bypass nahi karta.
         </p>
 
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2 pt-1">
@@ -477,44 +626,68 @@ export const AppAutomationHub: React.FC<AppAutomationHubProps> = ({
         </div>
 
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2.5 pt-1">
-          {filteredApps.map((app) => (
-            <div
-              key={app.id}
-              onClick={() => handleLaunchApp(app)}
-              className="p-3 rounded-2xl bg-slate-950/70 hover:bg-slate-800/80 border border-slate-800/80 hover:border-cyan-400/50 transition cursor-pointer flex flex-col items-center text-center gap-2 group relative overflow-hidden shadow-sm"
-            >
-              {app.id.startsWith('custom_') && (
-                <button
-                  onClick={(e) => handleDeleteCustomApp(e, app.id)}
-                  className="absolute top-1.5 right-1.5 p-1 rounded-lg bg-slate-900/90 text-slate-400 hover:text-red-400 opacity-0 group-hover:opacity-100 transition"
-                  title="Remove custom app"
-                >
-                  <Trash2 className="w-3 h-3" />
-                </button>
-              )}
-
+          {filteredApps.map((app) => {
+            const isAllowed = appPermissionsMap[app.packageName] !== false;
+            return (
               <div
-                className={`w-11 h-11 rounded-2xl bg-gradient-to-tr ${app.iconColor} flex items-center justify-center text-white font-extrabold text-sm shadow-md group-hover:scale-105 transition-transform`}
+                key={app.id}
+                onClick={() => handleLaunchApp(app)}
+                className={`p-3 rounded-2xl bg-slate-950/70 hover:bg-slate-800/80 border transition cursor-pointer flex flex-col items-center text-center gap-2 group relative overflow-hidden shadow-sm ${
+                  isAllowed ? 'border-slate-800/80 hover:border-cyan-400/50' : 'border-rose-500/30 opacity-65'
+                }`}
               >
-                {app.name.slice(0, 2).toUpperCase()}
-              </div>
+                <button
+                  type="button"
+                  onClick={(e) => handleToggleAppPermission(e, app.packageName)}
+                  title={isAllowed ? 'Disable JARVIS control for this app' : 'Allow JARVIS control for this app'}
+                  className={`absolute top-1.5 left-1.5 p-1 rounded-lg text-[9px] font-bold transition ${
+                    isAllowed
+                      ? 'bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/30'
+                      : 'bg-rose-500/20 text-rose-300 hover:bg-rose-500/35'
+                  }`}
+                >
+                  {isAllowed ? <ShieldCheck className="w-3 h-3" /> : <Lock className="w-3 h-3" />}
+                </button>
 
-              <div className="w-full">
-                <span className="text-xs font-semibold text-slate-200 block truncate group-hover:text-cyan-300">
-                  {app.name}
-                </span>
-                <span className="text-[10px] text-slate-500 block truncate font-mono">
-                  {app.packageName}
-                </span>
-              </div>
+                {app.id.startsWith('custom_') && (
+                  <button
+                    onClick={(e) => handleDeleteCustomApp(e, app.id)}
+                    className="absolute top-1.5 right-1.5 p-1 rounded-lg bg-slate-900/90 text-slate-400 hover:text-red-400 opacity-0 group-hover:opacity-100 transition"
+                    title="Remove custom app"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                )}
 
-              {app.supportsInAppAction && (
-                <span className="text-[9px] px-1.5 py-0.2 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30">
-                  In-App Ready
-                </span>
-              )}
-            </div>
-          ))}
+                <div
+                  className={`w-11 h-11 rounded-2xl bg-gradient-to-tr ${app.iconColor} flex items-center justify-center text-white font-extrabold text-sm shadow-md group-hover:scale-105 transition-transform`}
+                >
+                  {app.name.slice(0, 2).toUpperCase()}
+                </div>
+
+                <div className="w-full">
+                  <span className="text-xs font-semibold text-slate-200 block truncate group-hover:text-cyan-300">
+                    {app.name}
+                  </span>
+                  <span className="text-[10px] text-slate-500 block truncate font-mono">
+                    {app.packageName}
+                  </span>
+                </div>
+
+                {!isAllowed ? (
+                  <span className="text-[9px] px-1.5 py-0.2 rounded bg-rose-500/20 text-rose-300 border border-rose-500/30">
+                    Blocked
+                  </span>
+                ) : (
+                  app.supportsInAppAction && (
+                    <span className="text-[9px] px-1.5 py-0.2 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                      Intent Ready
+                    </span>
+                  )
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
 

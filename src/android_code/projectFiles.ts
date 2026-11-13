@@ -76,7 +76,15 @@ export const ANDROID_PROJECT_FILES: AndroidProjectFile[] = [
         <package android:name="com.vivo.website" />
         <package android:name="com.vivo.weather" />
         <package android:name="com.whatsapp" />
+        <package android:name="com.whatsapp.w4b" />
         <package android:name="com.google.android.youtube" />
+        <package android:name="com.android.chrome" />
+        <package android:name="com.google.android.gm" />
+        <package android:name="com.spotify.music" />
+        <package android:name="com.instagram.android" />
+        <package android:name="com.phonepe.app" />
+        <package android:name="com.google.android.apps.nbu.paisa.user" />
+        <package android:name="net.one97.paytm" />
     </queries>
 
     <application
@@ -106,6 +114,12 @@ export const ANDROID_PROJECT_FILES: AndroidProjectFile[] = [
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".WebCompanionActivity"
+            android:exported="false"
+            android:label="JARVIS Web Companion"
+            android:theme="@style/Theme.JarvisAI" />
 
         <service
             android:name=".service.JarvisForegroundVoiceService"
@@ -352,6 +366,7 @@ class MainActivity : ComponentActivity(), RecognitionListener {
     description: 'Dispatches intents: Flashlight, Volume, Battery, YouTube, WhatsApp, Camera, Settings, and Accessibility.',
     content: `package com.jarvis.ai.router
 
+import android.app.SearchManager
 import android.bluetooth.BluetoothAdapter
 import android.content.Context
 import android.content.Intent
@@ -364,15 +379,21 @@ import android.os.BatteryManager
 import android.provider.MediaStore
 import android.provider.Settings
 import android.view.KeyEvent
+import com.jarvis.ai.discovery.InstalledAppDiscovery
 import com.jarvis.ai.service.JarvisAccessibilityService
 
 sealed class CommandResult {
     data class Handled(val message: String, val requiresConfirmation: Boolean = false) : CommandResult()
+    data class NotInstalled(val appName: String, val reason: String) : CommandResult()
+    data class PermissionDenied(val permissionType: String, val reason: String) : CommandResult()
     data class NeedsAiProcessing(val query: String) : CommandResult()
     data class Error(val reason: String) : CommandResult()
 }
 
-class CommandRouter(private val context: Context) {
+class CommandRouter(
+    private val context: Context,
+    private val discovery: InstalledAppDiscovery = InstalledAppDiscovery(context)
+) {
     private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
@@ -408,6 +429,19 @@ class CommandRouter(private val context: Context) {
     fun routeCommand(input: String): CommandResult {
         val text = input.trim().lowercase()
 
+        // 0. SECURITY GUARDRAIL: Never bypass OTP, lock screens, login screens, or unauthorized actions
+        if (text.contains("bypass") ||
+            text.contains("read otp") ||
+            text.contains("otp padho") ||
+            text.contains("skip login") ||
+            text.contains("unlock without password")
+        ) {
+            return CommandResult.PermissionDenied(
+                "security_policy",
+                "Security Policy: JARVIS OTP verification, login screens, ya Android app permissions ko bypass nahi karti."
+            )
+        }
+
         if (text.contains("flashlight on") || text.contains("torch on") || text.contains("torch chalu")) {
             return setFlashlight(true)
         }
@@ -434,6 +468,7 @@ class CommandRouter(private val context: Context) {
         }
         if (text.contains("display setting") || text.contains("brightness")) return openSettingsAction(Settings.ACTION_DISPLAY_SETTINGS, "Display Settings khol rahi hoon!")
         if (text.contains("sound setting")) return openSettingsAction(Settings.ACTION_SOUND_SETTINGS, "Sound Settings khol rahi hoon!")
+        if (text.contains("accessibility setting")) return openSettingsAction(Settings.ACTION_ACCESSIBILITY_SETTINGS, "Accessibility Settings open kar rahi hoon!")
 
         // Music Controls
         if (text.contains("music") || text.contains("song")) {
@@ -442,11 +477,63 @@ class CommandRouter(private val context: Context) {
             if (text.contains("pause") || text.contains("stop")) { sendMediaKey(KeyEvent.KEYCODE_MEDIA_PAUSE); return CommandResult.Handled("Music pause kar diya!") }
         }
 
-        // In-App Deep Actions
-        if (text.contains("youtube") && (text.contains("play") || text.contains("search") || text.contains("chalao"))) {
-            val q = text.replace(Regex("\\\\b(youtube|par|me|play|search|chalao|karo)\\\\b"), " ").trim()
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com/results?search_query=" + Uri.encode(q))).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }
-            return try { context.startActivity(intent); CommandResult.Handled("YouTube me " + q + " search kiya!") } catch (e: Exception) { launchFirstAvailable(listOf("com.google.android.youtube"), "YouTube open kiya!") }
+        // In-App Deep Actions (Explicit package intents — never fake browser tabs!)
+        if (text.contains("youtube") && (text.contains("play") || text.contains("search") || text.contains("chalao") || text.contains("dhundho") || text.contains("video"))) {
+            val ytPkg = "com.google.android.youtube"
+            if (!discovery.isPackageInstalled(ytPkg)) return CommandResult.NotInstalled("YouTube", "YouTube app phone me installed nahi hai.")
+            if (!discovery.isAppAllowed(ytPkg)) return CommandResult.PermissionDenied("app_control", "User ne YouTube control off kiya hai.")
+            val q = text.replace(Regex("\\\\b(youtube|par|me|mein|on|for|play|search|chalao|dhundho|karo|open|kholo)\\\\b"), " ").replace(Regex("\\\\s+"), " ").trim().ifEmpty { "trending" }
+            val searchIntent = Intent(Intent.ACTION_SEARCH).apply { setPackage(ytPkg); putExtra(SearchManager.QUERY, q); flags = Intent.FLAG_ACTIVITY_NEW_TASK }
+            if (searchIntent.resolveActivity(context.packageManager) != null) {
+                context.startActivity(searchIntent)
+                return CommandResult.Handled("YouTube app me " + q + " search kar rahi hoon!")
+            }
+            val viewIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com/results?search_query=" + Uri.encode(q))).apply { setPackage(ytPkg); flags = Intent.FLAG_ACTIVITY_NEW_TASK }
+            if (viewIntent.resolveActivity(context.packageManager) != null) {
+                context.startActivity(viewIntent)
+                return CommandResult.Handled("YouTube me " + q + " open kiya!")
+            }
+            return launchPackageDirectly(ytPkg)
+        }
+
+        if (text.contains("chrome") && (text.contains("http") || text.contains(".com") || text.contains(".org") || text.contains(".in") || text.contains("website"))) {
+            val chromePkg = "com.android.chrome"
+            if (!discovery.isPackageInstalled(chromePkg)) return CommandResult.NotInstalled("Chrome", "Google Chrome phone me installed nahi hai.")
+            val urlMatch = Regex("(https?://[^\\\\s]+|[a-zA-Z0-9-]+\\\\.[a-zA-Z]{2,}(?:/[^\\\\s]*)?)").find(text)
+            if (urlMatch != null) {
+                val url = if (urlMatch.value.startsWith("http")) urlMatch.value else "https://" + urlMatch.value
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply { setPackage(chromePkg); flags = Intent.FLAG_ACTIVITY_NEW_TASK }
+                if (intent.resolveActivity(context.packageManager) != null) {
+                    context.startActivity(intent)
+                    return CommandResult.Handled("Chrome me " + url + " open kar rahi hoon!")
+                }
+            }
+            return launchPackageDirectly(chromePkg)
+        }
+
+        if ((text.contains("map") || text.contains("maps")) && (text.contains("navigate") || text.contains("rasta") || text.contains("dhundho") || text.contains("search") || text.contains("directions"))) {
+            val mapsPkg = "com.google.android.apps.maps"
+            if (!discovery.isPackageInstalled(mapsPkg)) return CommandResult.NotInstalled("Google Maps", "Google Maps phone me installed nahi hai.")
+            val place = text.replace(Regex("\\\\b(google|map|maps|navigate|directions|rasta|dhundho|search|to|for|in|on)\\\\b"), " ").replace(Regex("\\\\s+"), " ").trim().ifEmpty { "nearby" }
+            val uri = if (text.contains("navigate") || text.contains("directions")) Uri.parse("google.navigation:q=" + Uri.encode(place)) else Uri.parse("geo:0,0?q=" + Uri.encode(place))
+            val intent = Intent(Intent.ACTION_VIEW, uri).apply { setPackage(mapsPkg); flags = Intent.FLAG_ACTIVITY_NEW_TASK }
+            if (intent.resolveActivity(context.packageManager) != null) {
+                context.startActivity(intent)
+                return CommandResult.Handled("Google Maps me " + place + " open kar rahi hoon!")
+            }
+            return launchPackageDirectly(mapsPkg)
+        }
+
+        if ((text.contains("gmail") || text.contains("email")) && (text.contains("send") || text.contains("compose") || text.contains("bhejo"))) {
+            val gmailPkg = "com.google.android.gm"
+            if (!discovery.isPackageInstalled(gmailPkg)) return CommandResult.NotInstalled("Gmail", "Gmail phone me installed nahi hai.")
+            val email = Regex("[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\\\.[a-zA-Z]{2,}").find(text)?.value.orEmpty()
+            val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:" + email)).apply { setPackage(gmailPkg); flags = Intent.FLAG_ACTIVITY_NEW_TASK }
+            if (intent.resolveActivity(context.packageManager) != null) {
+                context.startActivity(intent)
+                return CommandResult.Handled("Gmail compose screen open kar di hai!")
+            }
+            return launchPackageDirectly(gmailPkg)
         }
 
         if ((text.contains("play store") || text.contains("playstore")) && (text.contains("search") || text.contains("download"))) {
@@ -455,25 +542,39 @@ class CommandRouter(private val context: Context) {
             return try { context.startActivity(intent); CommandResult.Handled("Play Store me " + q + " search kar rahi hoon!") } catch (e: Exception) { launchFirstAvailable(listOf("com.android.vending"), "Play Store open kiya!") }
         }
 
-        // Accessibility In-App Automation
-        if (text.contains("scroll down") || text.contains("niche scroll")) {
-            return if (JarvisAccessibilityService.instance?.scrollForward() == true) CommandResult.Handled("Scroll down kar diya!") else CommandResult.Error("Accessibility chahiye.")
-        }
-        if (text.contains("scroll up") || text.contains("upar scroll")) {
-            return if (JarvisAccessibilityService.instance?.scrollBackward() == true) CommandResult.Handled("Scroll up kar diya!") else CommandResult.Error("Accessibility chahiye.")
-        }
-        if (text.startsWith("click ") || text.startsWith("dabao ")) {
-            val target = text.removePrefix("click ").removePrefix("dabao ").trim()
-            return if (JarvisAccessibilityService.instance?.clickElementByText(target) == true) CommandResult.Handled(target + " click kar diya!") else CommandResult.Error("Element nahi mila.")
+        // Accessibility In-App Automation (Explicit Permission Check)
+        if (text.contains("scroll down") || text.contains("scroll up") || text.startsWith("click ") || text == "go home" || text == "go back") {
+            val svc = JarvisAccessibilityService.instance
+                ?: return CommandResult.PermissionDenied("accessibility", "Accessibility permission required: Settings me JARVIS Accessibility Service enable karein.")
+            return when {
+                text.contains("scroll down") -> if (svc.scrollForward()) CommandResult.Handled("Scroll down kar diya!") else CommandResult.Error("Scroll nahi ho saka.")
+                text.contains("scroll up") -> if (svc.scrollBackward()) CommandResult.Handled("Scroll up kar diya!") else CommandResult.Error("Scroll nahi ho saka.")
+                text.startsWith("click ") -> {
+                    val target = text.removePrefix("click ").trim()
+                    if (svc.clickElementByText(target)) CommandResult.Handled(target + " click kar diya!") else CommandResult.Error("Element nahi mila.")
+                }
+                text == "go home" -> if (svc.performGoHome()) CommandResult.Handled("Home screen par aa gaye.") else CommandResult.Error("Home navigation failed.")
+                else -> if (svc.performGoBack()) CommandResult.Handled("Back kar diya.") else CommandResult.Error("Back navigation failed.")
+            }
         }
 
-        // Native System Apps (Camera, Calculator, Recorder)
+        // Native System Apps (Camera, Gallery, Phone, Calculator)
         if (text.contains("camera") && (text.contains("open") || text.contains("kholo") || text == "camera")) {
             return try {
                 context.startActivity(Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK })
                 CommandResult.Handled("Phone Camera open kar rahi hoon!")
             } catch (e: Exception) {
                 launchFirstAvailable(listOf("com.android.camera"), "Camera open kar rahi hoon!")
+            }
+        }
+        if ((text.contains("gallery") || text.contains("photos")) && (text.contains("open") || text.contains("kholo") || text == "gallery" || text == "photos")) {
+            val res = launchFirstAvailable(listOf("com.google.android.apps.photos", "com.vivo.gallery", "com.android.gallery3d"), "Gallery open kar rahi hoon!")
+            if (res is CommandResult.Handled) return res
+            return try {
+                context.startActivity(Intent(Intent.ACTION_VIEW, MediaStore.Images.Media.EXTERNAL_CONTENT_URI).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK })
+                CommandResult.Handled("Phone Gallery open kar rahi hoon!")
+            } catch (e: Exception) {
+                CommandResult.NotInstalled("Gallery / Photos", "Phone me Photos/Gallery app nahi mila.")
             }
         }
         if ((text.contains("calculator") || text == "calc") && (text.contains("open") || text.contains("kholo") || text == "calculator")) {
@@ -485,28 +586,19 @@ class CommandRouter(private val context: Context) {
             }
         }
 
-        // Universal App Launcher (26+ vivo & Google apps + dynamic PackageManager lookup)
+        // Universal App Launcher (InstalledAppDiscovery -> real PackageManager launch or clear NotInstalled)
         if (text.startsWith("open ") || text.startsWith("kholo ") || text.contains("chalu karo") || text.contains("open karo")) {
             val appQuery = text.replace(Regex("^(open|kholo)\\\\s+"), "").replace(Regex("\\\\s*(chalu karo|khol do|open karo|app)"), "").trim()
             for ((aliases, packages) in appPackageMap) {
                 if (aliases.any { appQuery == it || appQuery.contains(it) }) {
-                    val res = launchFirstAvailable(packages, appQuery + " open kar rahi hoon!")
-                    if (res is CommandResult.Handled) return res
+                    return launchFirstAvailable(packages, appQuery + " open kar rahi hoon!")
                 }
             }
-            val pm = context.packageManager
-            for (app in pm.getInstalledApplications(PackageManager.GET_META_DATA)) {
-                val label = pm.getApplicationLabel(app).toString().lowercase()
-                if (label.contains(appQuery) || appQuery.contains(label)) {
-                    val intent = pm.getLaunchIntentForPackage(app.packageName)
-                    if (intent != null) {
-                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        context.startActivity(intent)
-                        val realName = pm.getApplicationLabel(app).toString()
-                        return CommandResult.Handled(realName + " open kar rahi hoon!")
-                    }
-                }
+            val discovered = discovery.findBestMatchingInstalledApp(appQuery)
+            if (discovered != null) {
+                return launchPackageDirectly(discovered.packageName)
             }
+            return CommandResult.NotInstalled(appQuery, appQuery + " app phone me installed nahi hai.")
         }
 
         if (text.contains("battery")) {
@@ -515,20 +607,12 @@ class CommandRouter(private val context: Context) {
             return CommandResult.Handled("Aapke phone ki battery " + level + "% hai.")
         }
 
-        if (text == "go home" || text == "home screen") {
-            return if (JarvisAccessibilityService.instance?.performGoHome() == true) {
-                CommandResult.Handled("Home screen par aa gaye.")
-            } else {
-                CommandResult.Error("Accessibility permission chahiye.")
-            }
-        }
-
         if (text.startsWith("call ")) {
             val target = text.removePrefix("call ").trim()
             val digits = target.replace(Regex("[^\\\\d+]"), "")
             return if (digits.isNotEmpty()) {
                 context.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + digits)).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK })
-                CommandResult.Handled(digits + " par Phone Dialer open kar diya hai!")
+                CommandResult.Handled(digits + " par Phone Dialer open kar diya hai — confirm karke call dabayein!")
             } else {
                 CommandResult.Handled("Kya aap waqai me " + target + " ko call karna chahte hain?", requiresConfirmation = true)
             }
@@ -566,16 +650,165 @@ class CommandRouter(private val context: Context) {
         }
     }
 
+    fun launchPackageDirectly(packageName: String): CommandResult {
+        if (!discovery.isPackageInstalled(packageName)) {
+            return CommandResult.NotInstalled(packageName, "Yeh app ($packageName) phone me installed nahi hai.")
+        }
+        if (!discovery.isAppAllowed(packageName)) {
+            return CommandResult.PermissionDenied("app_control", "User ne $packageName ke liye JARVIS app control disable kiya hua hai.")
+        }
+        val intent = context.packageManager.getLaunchIntentForPackage(packageName)
+            ?: return CommandResult.NotInstalled(packageName, "$packageName launchable nahi hai.")
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.startActivity(intent)
+        return CommandResult.Handled("App open kar diya hai!")
+    }
+
     private fun launchFirstAvailable(packages: List<String>, msg: String): CommandResult {
         for (pkg in packages) {
-            val intent = context.packageManager.getLaunchIntentForPackage(pkg)
-            if (intent != null) {
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                context.startActivity(intent)
-                return CommandResult.Handled(msg)
+            if (discovery.isPackageInstalled(pkg)) {
+                return launchPackageDirectly(pkg)
             }
         }
-        return CommandResult.Error("App installed nahi hai.")
+        return CommandResult.NotInstalled("App", "Yeh app phone me installed nahi hai.")
+    }
+}`
+  },
+  {
+    path: 'app/src/main/java/com/jarvis/ai/discovery/InstalledAppDiscovery.kt',
+    name: 'InstalledAppDiscovery.kt',
+    category: 'kotlin',
+    language: 'kotlin',
+    description: 'Queries ONLY real installed launchable Android apps via PackageManager with per-app allow/block storage.',
+    content: `package com.jarvis.ai.discovery
+
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import org.json.JSONArray
+import org.json.JSONObject
+
+data class InstalledAppInfo(val appName: String, val packageName: String, val isAllowed: Boolean)
+
+class InstalledAppDiscovery(private val context: Context) {
+    private val prefs = context.getSharedPreferences("jarvis_allowed_apps_prefs", Context.MODE_PRIVATE)
+    private val pm: PackageManager = context.packageManager
+
+    fun discoverLaunchableApps(): List<InstalledAppInfo> {
+        val intent = Intent(Intent.ACTION_MAIN, null).addCategory(Intent.CATEGORY_LAUNCHER)
+        val resolved = pm.queryIntentActivities(intent, 0)
+        val seen = HashSet<String>()
+        val list = mutableListOf<InstalledAppInfo>()
+        for (ri in resolved) {
+            val pkg = ri.activityInfo?.packageName ?: continue
+            if (pkg == context.packageName || !seen.add(pkg)) continue
+            if (pm.getLaunchIntentForPackage(pkg) == null) continue
+            val label = ri.loadLabel(pm)?.toString()?.trim().orEmpty()
+            if (label.isNotEmpty()) list.add(InstalledAppInfo(label, pkg, isAppAllowed(pkg)))
+        }
+        return list.sortedBy { it.appName.lowercase() }
+    }
+
+    fun toJsonString(): String {
+        val arr = JSONArray()
+        discoverLaunchableApps().forEach {
+            arr.put(JSONObject().apply {
+                put("appName", it.appName)
+                put("packageName", it.packageName)
+                put("isAllowed", it.isAllowed)
+            })
+        }
+        return arr.toString()
+    }
+
+    fun isPackageInstalled(pkg: String): Boolean = pm.getLaunchIntentForPackage(pkg) != null
+    fun isAppAllowed(pkg: String): Boolean = prefs.getBoolean("allow_$pkg", true)
+    fun setAppAllowed(pkg: String, allowed: Boolean) { prefs.edit().putBoolean("allow_$pkg", allowed).apply() }
+}`
+  },
+  {
+    path: 'app/src/main/java/com/jarvis/ai/bridge/JarvisWebBridge.kt',
+    name: 'JarvisWebBridge.kt',
+    category: 'kotlin',
+    language: 'kotlin',
+    description: 'Restricted WebView @JavascriptInterface bridge connecting hosted JARVIS UI to approved Android intents & PackageManager discovery.',
+    content: `package com.jarvis.ai.bridge
+
+import android.content.Context
+import android.net.Uri
+import android.webkit.JavascriptInterface
+import com.jarvis.ai.discovery.InstalledAppDiscovery
+import com.jarvis.ai.router.CommandResult
+import com.jarvis.ai.router.CommandRouter
+import org.json.JSONObject
+
+class JarvisWebBridge(private val context: Context, private val originProvider: () -> String) {
+    private val discovery = InstalledAppDiscovery(context)
+    private val router = CommandRouter(context, discovery)
+    private val approved = setOf("open_app", "open_app_name", "youtube_search", "maps_navigate", "chrome_open_url", "whatsapp_send", "gmail_compose", "open_dialer", "open_camera", "open_gallery", "open_settings")
+
+    private fun trusted(): Boolean {
+        val u = Uri.parse(originProvider())
+        val host = u.host?.lowercase() ?: return false
+        return (u.scheme == "https" && (host == "localhost" || host.endsWith(".run.app"))) || (u.scheme == "http" && host == "localhost")
+    }
+
+    @JavascriptInterface
+    fun getInstalledAppsJson(): String = if (trusted()) discovery.toJsonString() else "[]"
+
+    @JavascriptInterface
+    fun setAppAllowed(pkg: String, allowed: Boolean): Boolean {
+        if (!trusted()) return false
+        discovery.setAppAllowed(pkg, allowed)
+        return true
+    }
+
+    @JavascriptInterface
+    fun executeCommand(action: String, payload: String?): String {
+        if (!trusted() || action !in approved) {
+            return JSONObject().put("ok", false).put("status", "blocked_action").put("message", "Untrusted or unapproved action").toString()
+        }
+        val arg = payload.orEmpty().trim()
+        val res = if (action == "open_app") router.launchPackageDirectly(arg) else router.routeCommand("$action $arg")
+        return when (res) {
+            is CommandResult.Handled -> JSONObject().put("ok", true).put("status", "executed").put("message", res.message).put("installed", true).toString()
+            is CommandResult.NotInstalled -> JSONObject().put("ok", false).put("status", "not_installed").put("message", res.reason).put("installed", false).toString()
+            is CommandResult.PermissionDenied -> JSONObject().put("ok", false).put("status", "permission_denied").put("message", res.reason).toString()
+            else -> JSONObject().put("ok", false).put("status", "error").put("message", "Failed").toString()
+        }
+    }
+}`
+  },
+  {
+    path: 'app/src/main/java/com/jarvis/ai/WebCompanionActivity.kt',
+    name: 'WebCompanionActivity.kt',
+    category: 'kotlin',
+    language: 'kotlin',
+    description: 'Hardened Android WebView Activity hosting JARVIS Web UI with secure JarvisAndroid JS bridge.',
+    content: `package com.jarvis.ai
+
+import android.annotation.SuppressLint
+import android.os.Bundle
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import androidx.activity.ComponentActivity
+import com.jarvis.ai.bridge.JarvisWebBridge
+
+class WebCompanionActivity : ComponentActivity() {
+    private var currentUrl = "https://ais-pre-q47hvojn7ote7pwkpdldda-473929764636.asia-southeast1.run.app"
+    @SuppressLint("SetJavaScriptEnabled")
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        val wv = WebView(this).apply {
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, url: String?) { if (url != null) currentUrl = url }
+            }
+            addJavascriptInterface(JarvisWebBridge(applicationContext) { currentUrl }, "JarvisAndroid")
+            loadUrl(currentUrl)
+        }
+        setContentView(wv)
     }
 }`
   },
@@ -1019,6 +1252,8 @@ class JarvisViewModel(app: Application) : AndroidViewModel(app) {
 
         when (val result = router.routeCommand(input)) {
             is CommandResult.Handled -> reply(result.message)
+            is CommandResult.NotInstalled -> reply(result.reason)
+            is CommandResult.PermissionDenied -> reply(result.reason)
             is CommandResult.Error -> reply(result.reason)
             is CommandResult.NeedsAiProcessing -> {
                 viewModelScope.launch {

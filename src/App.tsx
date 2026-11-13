@@ -63,7 +63,7 @@ import {
 } from 'lucide-react';
 
 function isNativePhoneUri(url: string): boolean {
-  return /^(intent:|tel:|sms:|market:|whatsapp:|spotify:|tg:|geo:)/i.test(url);
+  return /^(intent:|tel:|sms:|mailto:|market:|whatsapp:|spotify:|tg:|geo:)/i.test(url);
 }
 
 function launchExternalUrlSafe(url: string) {

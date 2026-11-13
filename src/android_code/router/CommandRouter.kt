@@ -1,9 +1,9 @@
 package com.jarvis.ai.router
 
+import android.app.SearchManager
 import android.bluetooth.BluetoothAdapter
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.media.AudioManager
@@ -13,21 +13,27 @@ import android.provider.AlarmClock
 import android.provider.MediaStore
 import android.provider.Settings
 import android.view.KeyEvent
+import com.jarvis.ai.discovery.InstalledAppDiscovery
 import com.jarvis.ai.service.JarvisAccessibilityService
 
 sealed class CommandResult {
     data class Handled(val message: String, val requiresConfirmation: Boolean = false) : CommandResult()
+    data class NotInstalled(val appName: String, val reason: String) : CommandResult()
+    data class PermissionDenied(val permissionType: String, val reason: String) : CommandResult()
     data class NeedsAiProcessing(val query: String) : CommandResult()
     data class Error(val reason: String) : CommandResult()
 }
 
-class CommandRouter(private val context: Context) {
+class CommandRouter(
+    private val context: Context,
+    private val discovery: InstalledAppDiscovery = InstalledAppDiscovery(context)
+) {
 
     private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private var isTorchOn = false
 
-    // Comprehensive app package aliases covering all vivo, Google, and daily apps
+    // Known Android app aliases -> real Android package names
     private val appPackageMap: List<Pair<List<String>, List<String>>> = listOf(
         listOf("maps", "google maps", "map") to listOf("com.google.android.apps.maps"),
         listOf("meet", "google meet") to listOf("com.google.android.apps.meetings", "com.google.android.apps.tachyon"),
@@ -54,27 +60,54 @@ class CommandRouter(private val context: Context) {
         listOf("vivo store", "vivostore") to listOf("com.vivo.website", "com.vivo.store"),
         listOf("weather", "mausam") to listOf("com.vivo.weather", "com.google.android.apps.weather"),
         listOf("whatsapp", "whats app") to listOf("com.whatsapp", "com.whatsapp.w4b"),
-        listOf("youtube", "yt") to listOf("com.google.android.youtube")
+        listOf("youtube", "yt") to listOf("com.google.android.youtube"),
+        listOf("gmail", "email", "mail") to listOf("com.google.android.gm"),
+        listOf("chrome", "google chrome") to listOf("com.android.chrome")
     )
+
+    fun launchPackageDirectly(packageName: String): CommandResult {
+        if (!discovery.isPackageInstalled(packageName)) {
+            return CommandResult.NotInstalled(packageName, "Yeh app ($packageName) phone me installed nahi hai.")
+        }
+        if (!discovery.isAppAllowed(packageName)) {
+            return CommandResult.PermissionDenied(
+                "app_control",
+                "User ne $packageName ke liye JARVIS app control disable kiya hua hai."
+            )
+        }
+        val launchIntent = context.packageManager.getLaunchIntentForPackage(packageName)
+            ?: return CommandResult.NotInstalled(packageName, "$packageName launchable nahi hai.")
+        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.startActivity(launchIntent)
+        return CommandResult.Handled("App launch kar diya hai!")
+    }
 
     fun routeCommand(input: String): CommandResult {
         val text = input.trim().lowercase()
 
-        // 1. FLASHLIGHT / TORCH (English + Hinglish + Hindi)
-        if (text.contains("flashlight on") || text.contains("torch on") || text.contains("torch chalu") || text.contains("flashlight chalu") || text.contains("फ्लैशलाइट ऑन") || text.contains("टॉर्च ऑन")) {
+        // 0. SECURITY GUARDRAIL: Never bypass OTP, lock screens, login screens, or unauthorized purchases
+        if (text.contains("bypass") ||
+            text.contains("read otp") ||
+            text.contains("otp padho") ||
+            text.contains("skip login") ||
+            text.contains("unlock without password")
+        ) {
+            return CommandResult.PermissionDenied(
+                "security_policy",
+                "Security Policy: JARVIS OTP verification, login screens, ya Android app permissions ko bypass nahi karti."
+            )
+        }
+
+        // 1. FLASHLIGHT / TORCH
+        if (text.contains("flashlight on") || text.contains("torch on") || text.contains("torch chalu") || text.contains("flashlight chalu")) {
             return toggleFlashlight(true)
         }
-        if (text.contains("flashlight off") || text.contains("torch off") || text.contains("torch band") || text.contains("flashlight band") || text.contains("फ्लैशलाइट बंद") || text.contains("टॉर्च बंद")) {
+        if (text.contains("flashlight off") || text.contains("torch off") || text.contains("torch band") || text.contains("flashlight band")) {
             return toggleFlashlight(false)
         }
 
-        // 1B. MOBILE DATA / WI-FI / BLUETOOTH TOGGLES (Uses Accessibility Quick Settings or Connectivity Panel)
-        if (text.contains("data on") || text.contains("mobile data on") || text.contains("data chalu") || text.contains("डेटा ऑन") || text.contains("डेटा चालू")) {
-            val service = JarvisAccessibilityService.instance
-            if (service != null) {
-                service.performOpenQuickSettings()
-                return CommandResult.Handled("Quick Settings khol diya hai — Mobile Data toggle karein!")
-            }
+        // 1B. MOBILE DATA / WI-FI / BLUETOOTH / SETTINGS PANELS
+        if (text.contains("data on") || text.contains("mobile data on") || text.contains("data off") || text.contains("data setting")) {
             val action = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
                 Settings.Panel.ACTION_INTERNET_CONNECTIVITY
             } else {
@@ -82,17 +115,8 @@ class CommandRouter(private val context: Context) {
             }
             return openSettingsAction(action, "Mobile Data Panel open kar rahi hoon!")
         }
-        if (text.contains("data off") || text.contains("mobile data off") || text.contains("data band") || text.contains("डेटा बंद")) {
-            val action = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-                Settings.Panel.ACTION_INTERNET_CONNECTIVITY
-            } else {
-                Settings.ACTION_DATA_ROAMING_SETTINGS
-            }
-            return openSettingsAction(action, "Mobile Data band karne ke liye Internet Panel open kar rahi hoon!")
-        }
 
-        // 2. SETTINGS SUB-SCREENS & HARDWARE MODES (Wi-Fi, Bluetooth, Hotspot, Airplane, DND, Brightness, Display, Sound, Accessibility)
-        if (text.contains("wifi setting") || text.contains("wi-fi setting") || text.contains("wifi on") || text.contains("wifi off")) {
+        if (text.contains("wifi") || text.contains("wi-fi")) {
             val action = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
                 Settings.Panel.ACTION_WIFI
             } else {
@@ -117,7 +141,7 @@ class CommandRouter(private val context: Context) {
                 val enableSilent = !(text.contains("off") || text.contains("band"))
                 audioManager.ringerMode = if (enableSilent) AudioManager.RINGER_MODE_SILENT else AudioManager.RINGER_MODE_NORMAL
                 CommandResult.Handled(if (enableSilent) "Phone Silent / DND mode par set kar diya hai!" else "Phone Normal ringer mode par kar diya hai!")
-            } catch (e: SecurityException) {
+            } catch (_: SecurityException) {
                 openSettingsAction(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS, "DND permission screen open kar rahi hoon!")
             }
         }
@@ -132,17 +156,11 @@ class CommandRouter(private val context: Context) {
             }
             return openSettingsAction(Settings.ACTION_DISPLAY_SETTINGS, "Display Brightness settings open kar rahi hoon!")
         }
-        if (text.contains("display setting")) {
-            return openSettingsAction(Settings.ACTION_DISPLAY_SETTINGS, "Display Settings open kar rahi hoon!")
-        }
-        if (text.contains("sound setting") || text.contains("volume setting")) {
-            return openSettingsAction(Settings.ACTION_SOUND_SETTINGS, "Sound Settings open kar rahi hoon!")
-        }
-        if (text.contains("accessibility setting")) {
-            return openSettingsAction(Settings.ACTION_ACCESSIBILITY_SETTINGS, "Accessibility Settings open kar rahi hoon!")
-        }
+        if (text.contains("display setting")) return openSettingsAction(Settings.ACTION_DISPLAY_SETTINGS, "Display Settings open kar rahi hoon!")
+        if (text.contains("sound setting") || text.contains("volume setting")) return openSettingsAction(Settings.ACTION_SOUND_SETTINGS, "Sound Settings open kar rahi hoon!")
+        if (text.contains("accessibility setting")) return openSettingsAction(Settings.ACTION_ACCESSIBILITY_SETTINGS, "Accessibility Settings open kar rahi hoon!")
 
-        // 3. MUSIC PLAYBACK CONTROLS (Next, Previous, Pause, Play)
+        // 2. MUSIC PLAYBACK CONTROLS
         if (text.contains("music") || text.contains("song") || text.contains("gana")) {
             when {
                 text.contains("next") || text.contains("agla") -> {
@@ -160,203 +178,225 @@ class CommandRouter(private val context: Context) {
             }
         }
 
-        // 4. IN-APP DEEP ACTIONS (YouTube, Maps, Play Store, Pinterest, Meet, WhatsApp)
-        if (text.contains("youtube") && (text.contains("play") || text.contains("search") || text.contains("chalao") || text.contains("dhundho"))) {
-            val query = text.replace(Regex("\\b(youtube|par|me|play|search|chalao|dhundho|song|gaana|karo)\\b"), " ").trim()
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com/results?search_query=" + Uri.encode(query))).apply {
+        // 3. IN-APP COMMANDS (Targeted ONLY to real installed Android apps — NEVER fake browser tabs!)
+
+        // YouTube: Search & Open Video inside real YouTube app
+        if (text.contains("youtube") && (text.contains("search") || text.contains("play") || text.contains("chalao") || text.contains("dhundho") || text.contains("video"))) {
+            val ytPkg = "com.google.android.youtube"
+            if (!discovery.isPackageInstalled(ytPkg)) {
+                return CommandResult.NotInstalled("YouTube", "YouTube app aapke phone me installed nahi hai.")
+            }
+            if (!discovery.isAppAllowed(ytPkg)) {
+                return CommandResult.PermissionDenied("app_control", "User ne YouTube ke liye JARVIS app control off kiya hai.")
+            }
+            val query = text
+                .replace(Regex("\\b(youtube|par|me|mein|on|for|search|play|chalao|dhundho|karo|open|kholo)\\b"), " ")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+                .ifEmpty { "trending" }
+
+            val searchIntent = Intent(Intent.ACTION_SEARCH).apply {
+                setPackage(ytPkg)
+                putExtra(SearchManager.QUERY, query)
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK
             }
-            return try {
-                context.startActivity(intent)
-                CommandResult.Handled("YouTube me \"$query\" search karke play kar rahi hoon!")
-            } catch (e: Exception) {
-                launchFirstAvailable(listOf("com.google.android.youtube"), "YouTube open kar rahi hoon!")
+            if (searchIntent.resolveActivity(context.packageManager) != null) {
+                context.startActivity(searchIntent)
+                return CommandResult.Handled("YouTube app me \"$query\" search kar rahi hoon!")
             }
-        }
-
-        if ((text.contains("play store") || text.contains("playstore")) && (text.contains("search") || text.contains("download") || text.contains("install"))) {
-            val appSearch = text.replace(Regex("\\b(play store|playstore|par|me|search|download|install|karo|app)\\b"), " ").trim()
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("market://search?q=" + Uri.encode(appSearch))).apply {
+            val viewIntent = Intent(
+                Intent.ACTION_VIEW,
+                Uri.parse("https://www.youtube.com/results?search_query=" + Uri.encode(query))
+            ).apply {
+                setPackage(ytPkg)
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK
             }
-            return try {
-                context.startActivity(intent)
-                CommandResult.Handled("Play Store me \"$appSearch\" search kar rahi hoon!")
-            } catch (e: Exception) {
-                launchFirstAvailable(listOf("com.android.vending"), "Play Store open kar rahi hoon!")
+            if (viewIntent.resolveActivity(context.packageManager) != null) {
+                context.startActivity(viewIntent)
+                return CommandResult.Handled("YouTube app me \"$query\" open kar rahi hoon!")
             }
+            return launchPackageDirectly(ytPkg)
         }
 
-        if (text.contains("pinterest") && (text.contains("search") || text.contains("dhundho") || text.contains("wallpaper"))) {
-            val pinQuery = text.replace(Regex("\\b(pinterest|par|me|search|dhundho|karo)\\b"), " ").trim()
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.pinterest.com/search/pins/?q=" + Uri.encode(pinQuery))).apply {
+        // Chrome: Open requested website explicitly in real Chrome browser
+        if (text.contains("chrome") && (text.contains("http") || text.contains(".com") || text.contains(".org") || text.contains(".in") || text.contains(".net") || text.contains("website") || text.contains("open"))) {
+            val chromePkg = "com.android.chrome"
+            if (!discovery.isPackageInstalled(chromePkg)) {
+                return CommandResult.NotInstalled("Chrome", "Google Chrome app aapke phone me installed nahi hai.")
+            }
+            val urlMatch = Regex("""(https?://[^\s]+|[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:/[^\s]*)?)""").find(text)
+            if (urlMatch != null) {
+                val rawUrl = urlMatch.value
+                val finalUrl = if (rawUrl.startsWith("http")) rawUrl else "https://$rawUrl"
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(finalUrl)).apply {
+                    setPackage(chromePkg)
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                if (intent.resolveActivity(context.packageManager) != null) {
+                    context.startActivity(intent)
+                    return CommandResult.Handled("Chrome app me $finalUrl open kar rahi hoon!")
+                }
+            }
+            return launchPackageDirectly(chromePkg)
+        }
+
+        // Google Maps: Locations & Directions in real Google Maps app
+        if ((text.contains("map") || text.contains("maps")) && (text.contains("navigate") || text.contains("rasta") || text.contains("dhundho") || text.contains("nearest") || text.contains("search") || text.contains("directions"))) {
+            val mapsPkg = "com.google.android.apps.maps"
+            if (!discovery.isPackageInstalled(mapsPkg)) {
+                return CommandResult.NotInstalled("Google Maps", "Google Maps app aapke phone me installed nahi hai.")
+            }
+            val place = text
+                .replace(Regex("\\b(google|map|maps|navigate|directions|rasta|dhundho|search|le chalo|dikhao|to|for|in|on)\\b"), " ")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+                .ifEmpty { "nearby" }
+            val uri = if (text.contains("navigate") || text.contains("directions") || text.contains("rasta")) {
+                Uri.parse("google.navigation:q=" + Uri.encode(place))
+            } else {
+                Uri.parse("geo:0,0?q=" + Uri.encode(place))
+            }
+            val intent = Intent(Intent.ACTION_VIEW, uri).apply {
+                setPackage(mapsPkg)
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK
             }
-            return try {
+            if (intent.resolveActivity(context.packageManager) != null) {
                 context.startActivity(intent)
-                CommandResult.Handled("Pinterest par \"$pinQuery\" search kar rahi hoon!")
-            } catch (e: Exception) {
-                launchFirstAvailable(listOf("com.pinterest"), "Pinterest open kar rahi hoon!")
+                return CommandResult.Handled("Google Maps me \"$place\" open kar rahi hoon!")
             }
+            return launchPackageDirectly(mapsPkg)
         }
 
-        if (text.contains("map") && (text.contains("navigate") || text.contains("rasta") || text.contains("dhundho") || text.contains("nearest"))) {
-            val place = text.replace(Regex("\\b(google|map|maps|navigate|rasta|dhundho|le chalo|dikhao)\\b"), " ").trim()
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("google.navigation:q=" + Uri.encode(place))).apply {
+        // WhatsApp: Open chats / prepare share inside real WhatsApp (never opens web.whatsapp.com tab!)
+        if (text.contains("whatsapp") && (text.contains("message") || text.contains("bhejo") || text.contains("send") || text.contains("share"))) {
+            val waPkg = if (discovery.isPackageInstalled("com.whatsapp")) "com.whatsapp" else "com.whatsapp.w4b"
+            if (!discovery.isPackageInstalled(waPkg)) {
+                return CommandResult.NotInstalled("WhatsApp", "WhatsApp app aapke phone me installed nahi hai.")
+            }
+            val msg = text
+                .replace(Regex("\\b(whatsapp|par|me|on|in|message|bhejo|send|share|karo)\\b"), " ")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+            val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TEXT, msg.ifEmpty { "Hello!" })
+                setPackage(waPkg)
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK
             }
-            return try {
-                context.startActivity(intent)
-                CommandResult.Handled("Google Maps me \"$place\" ke liye navigation shuru kar rahi hoon!")
-            } catch (e: Exception) {
-                launchFirstAvailable(listOf("com.google.android.apps.maps"), "Google Maps open kar rahi hoon!")
+            if (sendIntent.resolveActivity(context.packageManager) != null) {
+                context.startActivity(sendIntent)
+                return CommandResult.Handled("WhatsApp message draft open kar diya hai — confirm karke send karein!")
             }
+            return launchPackageDirectly(waPkg)
         }
 
-        if (text.contains("whatsapp") && (text.contains("message") || text.contains("bhejo") || text.contains("send"))) {
-            val msg = text.replace(Regex("\\b(whatsapp|par|me|message|bhejo|send|karo)\\b"), " ").trim()
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://api.whatsapp.com/send?text=" + Uri.encode(msg))).apply {
+        // Gmail: Compose email inside real Gmail app
+        if ((text.contains("gmail") || text.contains("email") || text.contains("mail")) && (text.contains("send") || text.contains("compose") || text.contains("bhejo") || text.contains("likho"))) {
+            val gmailPkg = "com.google.android.gm"
+            if (!discovery.isPackageInstalled(gmailPkg)) {
+                return CommandResult.NotInstalled("Gmail", "Gmail app aapke phone me installed nahi hai.")
+            }
+            val emailMatch = Regex("""[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}""").find(text)
+            val recipient = emailMatch?.value.orEmpty()
+            val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:$recipient")).apply {
+                setPackage(gmailPkg)
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK
             }
-            return try {
+            if (intent.resolveActivity(context.packageManager) != null) {
                 context.startActivity(intent)
-                CommandResult.Handled("WhatsApp message prepare kar diya hai!")
-            } catch (e: Exception) {
-                launchFirstAvailable(listOf("com.whatsapp"), "WhatsApp open kar rahi hoon!")
+                return CommandResult.Handled("Gmail compose screen open kar di hai!")
+            }
+            return launchPackageDirectly(gmailPkg)
+        }
+
+        // 4. ACCESSIBILITY IN-APP AUTOMATIONS (Explicit Accessibility Service Check!)
+        if (text.contains("scroll down") || text.contains("scroll up") || text.startsWith("click ") || text.startsWith("type ") || text.contains("screenshot") || text == "go home" || text == "go back" || text.contains("recent apps")) {
+            val service = JarvisAccessibilityService.instance
+                ?: return CommandResult.PermissionDenied(
+                    "accessibility",
+                    "Accessibility permission required: Settings me JARVIS Accessibility Service explicitly enable karein."
+                )
+
+            return when {
+                text.contains("scroll down") -> if (service.scrollForward()) CommandResult.Handled("Niche scroll kar diya!") else CommandResult.Error("Scroll nahi ho saka.")
+                text.contains("scroll up") -> if (service.scrollBackward()) CommandResult.Handled("Upar scroll kar diya!") else CommandResult.Error("Scroll nahi ho saka.")
+                text.startsWith("click ") -> {
+                    val target = text.removePrefix("click ").trim()
+                    if (service.clickElementByText(target)) CommandResult.Handled("\"$target\" click kar diya!") else CommandResult.Error("\"$target\" screen par nahi mila.")
+                }
+                text.startsWith("type ") -> {
+                    val typed = text.removePrefix("type ").trim()
+                    if (service.performTypeText("", typed)) CommandResult.Handled("\"$typed\" type kar diya!") else CommandResult.Error("Active text field nahi mila.")
+                }
+                text.contains("screenshot") -> if (service.takeScreenCapture()) CommandResult.Handled("Screenshot capture kar liya!") else CommandResult.Error("Screenshot failed.")
+                text == "go home" -> if (service.performGoHome()) CommandResult.Handled("Home screen par aa gaye.") else CommandResult.Error("Action failed.")
+                text == "go back" -> if (service.performGoBack()) CommandResult.Handled("Back kar diya.") else CommandResult.Error("Action failed.")
+                else -> if (service.performOpenRecents()) CommandResult.Handled("Recent apps open kiye.") else CommandResult.Error("Action failed.")
             }
         }
 
-        // 5. ACCESSIBILITY IN-APP AUTOMATIONS (Scroll, Click By Text, Type, Screenshot, Navigation)
-        if (text.contains("scroll down") || text.contains("niche scroll") || text.contains("niche jao")) {
-            val service = JarvisAccessibilityService.instance
-            return if (service != null && service.scrollForward()) {
-                CommandResult.Handled("Screen par niche scroll kar diya hai!")
-            } else {
-                CommandResult.Error("Accessibility Service enable kijiye.")
-            }
-        }
-
-        if (text.contains("scroll up") || text.contains("upar scroll") || text.contains("upar jao")) {
-            val service = JarvisAccessibilityService.instance
-            return if (service != null && service.scrollBackward()) {
-                CommandResult.Handled("Screen par upar scroll kar diya hai!")
-            } else {
-                CommandResult.Error("Accessibility Service enable kijiye.")
-            }
-        }
-
-        if (text.startsWith("click ") || text.startsWith("dabao ")) {
-            val target = text.removePrefix("click ").removePrefix("dabao ").trim()
-            val service = JarvisAccessibilityService.instance
-            return if (service != null && service.clickElementByText(target)) {
-                CommandResult.Handled("Screen par \"$target\" button click kar diya!")
-            } else {
-                CommandResult.Error("Accessibility element \"$target\" nahi mila ya service off hai.")
-            }
-        }
-
-        if (text.startsWith("type ") || text.startsWith("likho ")) {
-            val typed = text.removePrefix("type ").removePrefix("likho ").trim()
-            val service = JarvisAccessibilityService.instance
-            return if (service != null && service.performTypeText("", typed)) {
-                CommandResult.Handled("\"$typed\" type kar diya hai!")
-            } else {
-                CommandResult.Error("Active text field nahi mila.")
-            }
-        }
-
-        if (text.contains("screenshot") || text.contains("screen capture")) {
-            val service = JarvisAccessibilityService.instance
-            return if (service != null && service.takeScreenCapture()) {
-                CommandResult.Handled("Screenshot capture kar liya!")
-            } else {
-                CommandResult.Error("Accessibility permission required for screenshot.")
-            }
-        }
-
-        if (text == "go home" || text == "home screen" || text == "ghar jao") {
-            val service = JarvisAccessibilityService.instance
-            return if (service != null && service.performGoHome()) {
-                CommandResult.Handled("Home screen par aa gaye hain.")
-            } else {
-                CommandResult.Error("Accessibility service enable kijiye.")
-            }
-        }
-        if (text == "go back" || text == "back" || text == "piche jao") {
-            val service = JarvisAccessibilityService.instance
-            return if (service != null && service.performGoBack()) {
-                CommandResult.Handled("Back kar diya hai.")
-            } else {
-                CommandResult.Error("Accessibility service enable kijiye.")
-            }
-        }
-        if (text.contains("recent apps") || text.contains("recents")) {
-            val service = JarvisAccessibilityService.instance
-            return if (service != null && service.performOpenRecents()) {
-                CommandResult.Handled("Recent apps screen open kar di hai.")
-            } else {
-                CommandResult.Error("Accessibility service required.")
-            }
-        }
-
-        // 6. SYSTEM HARDWARE APPS (Camera, Calculator, Recorder) & UNIVERSAL APP LAUNCHER
+        // 5. CAMERA, GALLERY/PHOTOS, PHONE DIALER, CALCULATOR, RECORDER
         if (text.contains("camera") && (text.contains("open") || text.contains("kholo") || text == "camera")) {
             return try {
                 val intent = Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK
                 }
                 context.startActivity(intent)
-                CommandResult.Handled("Phone Camera open kar rahi hoon!")
-            } catch (e: Exception) {
-                launchFirstAvailable(listOf("com.android.camera", "com.sec.android.app.camera"), "Camera open kar rahi hoon!")
-            }
-        }
-        if ((text.contains("calculator") || text == "calc") && (text.contains("open") || text.contains("kholo") || text == "calculator" || text == "calc")) {
-            return try {
-                val intent = Intent(Intent.ACTION_MAIN).apply {
-                    addCategory(Intent.CATEGORY_APP_CALCULATOR)
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                }
-                context.startActivity(intent)
-                CommandResult.Handled("Phone Calculator open kar rahi hoon!")
-            } catch (e: Exception) {
-                launchFirstAvailable(listOf("com.google.android.calculator", "com.android.bbkcalculator", "com.sec.android.app.popupcalculator"), "Calculator open kar rahi hoon!")
-            }
-        }
-        if (text.contains("recorder") && (text.contains("open") || text.contains("kholo") || text.contains("start") || text == "recorder")) {
-            return try {
-                val intent = Intent(MediaStore.Audio.Media.RECORD_SOUND_ACTION).apply {
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                }
-                context.startActivity(intent)
-                CommandResult.Handled("Voice Recorder open kar rahi hoon!")
-            } catch (e: Exception) {
-                launchFirstAvailable(listOf("com.android.bbksoundrecorder", "com.vivo.soundrecorder", "com.google.android.apps.recorder"), "Recorder open kar rahi hoon!")
+                CommandResult.Handled("Real Camera app open kar rahi hoon!")
+            } catch (_: Exception) {
+                launchFirstAvailable("Camera", listOf("com.android.camera", "com.sec.android.app.camera", "com.vivo.camera"))
             }
         }
 
+        if ((text.contains("gallery") || text.contains("photos")) && (text.contains("open") || text.contains("kholo") || text == "gallery" || text == "photos")) {
+            val res = launchFirstAvailable("Gallery / Photos", listOf("com.google.android.apps.photos", "com.vivo.gallery", "com.android.gallery3d"))
+            if (res is CommandResult.Handled) return res
+            return try {
+                val intent = Intent(Intent.ACTION_VIEW, MediaStore.Images.Media.EXTERNAL_CONTENT_URI).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                context.startActivity(intent)
+                CommandResult.Handled("Phone Gallery open kar rahi hoon!")
+            } catch (_: Exception) {
+                CommandResult.NotInstalled("Gallery / Photos", "Phone me Photos/Gallery app nahi mila.")
+            }
+        }
+
+        if ((text.contains("phone") || text.contains("dialer")) && (text.contains("open") || text.contains("kholo"))) {
+            return try {
+                val intent = Intent(Intent.ACTION_DIAL).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }
+                context.startActivity(intent)
+                CommandResult.Handled("Phone Dialer open kar diya hai!")
+            } catch (_: Exception) {
+                launchFirstAvailable("Phone", listOf("com.android.dialer", "com.google.android.dialer"))
+            }
+        }
+
+        // 6. UNIVERSAL REAL INSTALLED APP LAUNCHER
         if (text.startsWith("open ") || text.startsWith("kholo ") || text.contains("chalu karo") || text.contains("open karo")) {
             val appQuery = text
                 .replace(Regex("^(open|kholo|launch|start)\\s+"), "")
                 .replace(Regex("\\s*(chalu karo|khol do|open karo|app)"), "")
                 .trim()
 
-            // Check curated vivo & Google app map first
             for ((aliases, packages) in appPackageMap) {
                 if (aliases.any { appQuery == it || appQuery.contains(it) }) {
-                    val result = launchFirstAvailable(packages, "$appQuery open kar rahi hoon!")
-                    if (result is CommandResult.Handled) return result
+                    return launchFirstAvailable(appQuery, packages)
                 }
             }
 
-            // Fallback to dynamic PackageManager lookup across all installed phone apps
-            val dynamicLaunchResult = launchAnyInstalledApp(appQuery)
-            if (dynamicLaunchResult != null) {
-                return dynamicLaunchResult
+            val discoveredApp = discovery.findBestMatchingInstalledApp(appQuery)
+            if (discoveredApp != null) {
+                return launchPackageDirectly(discoveredApp.packageName)
             }
+
+            return CommandResult.NotInstalled(
+                appQuery,
+                "\"$appQuery\" app aapke phone me installed nahi mila."
+            )
         }
 
-        // 7. DEVICE VOLUME CONTROL
+        // 7. VOLUME, ALARM, BATTERY, TIME
         if (text.contains("volume")) {
             if (text.contains("up") || text.contains("badhao")) {
                 audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI)
@@ -366,17 +406,7 @@ class CommandRouter(private val context: Context) {
                 audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI)
                 return CommandResult.Handled("Volume kam kar diya hai!")
             }
-            val match = Regex("""(\d+)%?""").find(text)
-            if (match != null) {
-                val percent = match.groupValues[1].toIntOrNull() ?: 50
-                val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-                val target = ((percent / 100.0) * max).toInt()
-                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, target, AudioManager.FLAG_SHOW_UI)
-                return CommandResult.Handled("Volume $percent% set kar diya hai!")
-            }
         }
-
-        // 8. ALARM
         if (text.contains("alarm")) {
             val intent = Intent(AlarmClock.ACTION_SET_ALARM).apply {
                 putExtra(AlarmClock.EXTRA_HOUR, 7)
@@ -387,50 +417,38 @@ class CommandRouter(private val context: Context) {
             return try {
                 context.startActivity(intent)
                 CommandResult.Handled("Alarm screen open kar di hai!")
-            } catch (e: Exception) {
-                CommandResult.Error("Alarm app nahi mila.")
+            } catch (_: Exception) {
+                CommandResult.NotInstalled("Clock / Alarm", "Phone me Alarm app nahi mila.")
             }
         }
-
-        // 9. BATTERY STATUS
         if (text.contains("battery")) {
             val bm = context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
             val level = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
             return CommandResult.Handled("Aapke phone ki battery $level% hai.")
         }
 
-        // 10. TIME & DATE
-        if (text.contains("time") || text.contains("samay")) {
-            val sdf = java.text.SimpleDateFormat("hh:mm a", java.util.Locale.getDefault())
-            return CommandResult.Handled("Abhi time hai ${sdf.format(java.util.Date())}")
-        }
-
-        // 11. CALL & SMS (Native Phone Dialer / Messages Execution)
+        // 8. CALL & SMS (Opens official Dialer / Messages with explicit user confirmation notice)
         if (text.startsWith("call ") || text.startsWith("phone lagao ")) {
             val target = text.removePrefix("call ").removePrefix("phone lagao ").trim()
             val digits = target.replace(Regex("[^\\d+]"), "")
-            return if (digits.isNotEmpty()) {
-                val dialIntent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:$digits")).apply {
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                }
-                context.startActivity(dialIntent)
-                CommandResult.Handled("$digits par Phone Dialer open kar diya hai!")
-            } else {
-                CommandResult.Handled("Kya aap waqai me $target ko call karna chahte hain? Kripya confirm karein.", requiresConfirmation = true)
+            val dialIntent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:$digits")).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
             }
+            context.startActivity(dialIntent)
+            return CommandResult.Handled("Phone Dialer open kar diya hai — confirm karke call dabayein!")
         }
 
         if (text.startsWith("sms ") || text.startsWith("message bhejo ")) {
             val target = text.removePrefix("sms ").removePrefix("message bhejo ").trim()
             val smsIntent = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:")).apply {
-                putExtra("sms_body", "Hello $target")
+                putExtra("sms_body", target)
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK
             }
             return try {
                 context.startActivity(smsIntent)
-                CommandResult.Handled("Messages app SMS bhejne ke liye open kar diya hai!")
-            } catch (e: Exception) {
-                launchFirstAvailable(listOf("com.google.android.apps.messaging", "com.android.mms"), "Messages open kar rahi hoon!")
+                CommandResult.Handled("Messages app draft open kar diya hai!")
+            } catch (_: Exception) {
+                CommandResult.NotInstalled("Messages", "SMS / Messages app installed nahi hai.")
             }
         }
 
@@ -447,41 +465,21 @@ class CommandRouter(private val context: Context) {
             val intent = Intent(action).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }
             context.startActivity(intent)
             CommandResult.Handled(msg)
-        } catch (e: Exception) {
-            launchFirstAvailable(listOf("com.android.settings"), "Settings open kar rahi hoon!")
+        } catch (_: Exception) {
+            launchFirstAvailable("Settings", listOf("com.android.settings"))
         }
     }
 
-    private fun launchFirstAvailable(packages: List<String>, successMsg: String): CommandResult {
-        val pm = context.packageManager
+    private fun launchFirstAvailable(displayName: String, packages: List<String>): CommandResult {
         for (pkg in packages) {
-            val launchIntent = pm.getLaunchIntentForPackage(pkg)
-            if (launchIntent != null) {
-                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                context.startActivity(launchIntent)
-                return CommandResult.Handled(successMsg)
+            if (discovery.isPackageInstalled(pkg)) {
+                return launchPackageDirectly(pkg)
             }
         }
-        return CommandResult.Error("Ye app phone me installed nahi mila.")
-    }
-
-    private fun launchAnyInstalledApp(spokenAppName: String): CommandResult? {
-        val pm = context.packageManager
-        val installedApps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
-
-        for (appInfo in installedApps) {
-            val appLabel = pm.getApplicationLabel(appInfo).toString().lowercase()
-            if (appLabel == spokenAppName || appLabel.contains(spokenAppName) || spokenAppName.contains(appLabel)) {
-                val intent = pm.getLaunchIntentForPackage(appInfo.packageName)
-                if (intent != null) {
-                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    context.startActivity(intent)
-                    val realName = pm.getApplicationLabel(appInfo).toString()
-                    return CommandResult.Handled("$realName open kar rahi hoon!")
-                }
-            }
-        }
-        return null
+        return CommandResult.NotInstalled(
+            displayName,
+            "$displayName aapke phone me installed nahi mila."
+        )
     }
 
     private fun toggleFlashlight(on: Boolean): CommandResult {

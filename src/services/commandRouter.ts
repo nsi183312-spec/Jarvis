@@ -6,6 +6,7 @@ import {
   AlarmItem,
 } from '../types';
 import { normalizeHindiToHinglish } from './offlineBrain';
+import { androidBridge } from './androidBridge';
 
 export interface ApiMappingInfo {
   intent: string;
@@ -359,12 +360,7 @@ export class CommandRouter {
   }
 
   private hasNativeAndroidBridge(): boolean {
-    try {
-      const bridge = typeof window !== 'undefined' ? (window as any)?.JarvisAndroid : null;
-      return Boolean(bridge && typeof bridge.executeCommand === 'function');
-    } catch {
-      return false;
-    }
+    return androidBridge.isNativeCompanionConnected();
   }
 
   public buildAppLaunchUrl(app: {
@@ -375,6 +371,7 @@ export class CommandRouter {
   }): string | undefined {
     const fallbackUrl = app.webUrl || undefined;
     if (!this.isAndroidDevice()) {
+      // Desktop browser preview only: never pretend a native Android app opened
       return fallbackUrl || app.deepLink || undefined;
     }
 
@@ -394,16 +391,19 @@ export class CommandRouter {
     if (app.key === 'maps') {
       return 'geo:0,0?q=';
     }
+    if (app.key === 'phone') {
+      return 'tel:';
+    }
 
     // Native phone URI schemes work directly without Chrome tabs
-    if (fallbackUrl && /^(tel:|sms:|market:|geo:)/i.test(fallbackUrl)) {
+    if (fallbackUrl && /^(tel:|sms:|market:|geo:|mailto:)/i.test(fallbackUrl)) {
       return fallbackUrl;
     }
-    if (app.deepLink && /^(tel:|sms:|market:|geo:)/i.test(app.deepLink)) {
+    if (app.deepLink && /^(tel:|sms:|market:|geo:|mailto:)/i.test(app.deepLink)) {
       return app.deepLink;
     }
 
-    // Prefer native custom app schemes on Android (no Chrome https fallback)
+    // Prefer native custom app schemes bound explicitly to Android package (zero Chrome fallback)
     if (app.deepLink && app.deepLink.includes('://') && app.packageName) {
       const idx = app.deepLink.indexOf('://');
       const scheme = app.deepLink.slice(0, idx);
@@ -411,21 +411,7 @@ export class CommandRouter {
       return `intent://${hostPath}#Intent;scheme=${scheme};package=${app.packageName};end`;
     }
 
-    // Strict HTTPS App Links targeting explicit installed package (no Chrome web tab fallback)
-    if (
-      fallbackUrl &&
-      fallbackUrl.startsWith('https://') &&
-      app.packageName &&
-      (app.key === 'youtube' ||
-        app.key === 'meet' ||
-        app.key === 'photos' ||
-        app.key === 'gmail')
-    ) {
-      const hostPath = fallbackUrl.slice(8);
-      return `intent://${hostPath}#Intent;scheme=https;package=${app.packageName};end`;
-    }
-
-    // Launcher intent for vendor/installed phone apps (vivo Notes, Music, MovieBox+, Safety, etc.)
+    // Launcher intent for any installed phone app (WhatsApp, Gmail, Photos/Gallery, MovieBox+, vivo Notes, etc.)
     if (app.packageName) {
       return `intent:#Intent;action=android.intent.action.MAIN;category=android.intent.category.LAUNCHER;package=${app.packageName};end`;
     }
@@ -441,7 +427,7 @@ export class CommandRouter {
     if (!this.isAndroidDevice()) {
       return httpsUrl;
     }
-    if (customSchemeUrl && /^(geo:|tel:|sms:|market:)/i.test(customSchemeUrl)) {
+    if (customSchemeUrl && /^(geo:|tel:|sms:|market:|mailto:)/i.test(customSchemeUrl)) {
       return customSchemeUrl;
     }
     if (customSchemeUrl && customSchemeUrl.includes('://')) {
@@ -560,16 +546,11 @@ export class CommandRouter {
   }
 
   private triggerAndroidBridge(action: string, value?: any): boolean {
-    try {
-      const bridge = typeof window !== 'undefined' ? (window as any)?.JarvisAndroid : null;
-      if (bridge && typeof bridge.executeCommand === 'function') {
-        bridge.executeCommand(action, value !== undefined ? String(value) : '');
-        return true;
-      }
-    } catch {
-      // web browser mode
-    }
-    return false;
+    return androidBridge.executeNativeCommand(action, value).ok;
+  }
+
+  private runBridgeCommand(action: string, value?: any) {
+    return androidBridge.executeNativeCommand(action, value);
   }
 
   public async executeLocalCommand(
@@ -577,6 +558,23 @@ export class CommandRouter {
     currentDeviceState: DeviceState
   ): Promise<CommandExecutionResult> {
     const query = normalizeHindiToHinglish(text);
+
+    // 0. SECURITY GUARDRAIL: Never bypass OTP, lock screens, login screens, or security protections
+    if (
+      query.includes('bypass') ||
+      query.includes('read otp') ||
+      query.includes('otp padho') ||
+      query.includes('skip login') ||
+      query.includes('unlock without') ||
+      query.includes('without confirmation')
+    ) {
+      return {
+        handled: true,
+        actionType: 'security_blocked',
+        reply:
+          'Security Policy: JARVIS OTP verification, login screens, ya Android security permissions ko bypass nahi karti.',
+      };
+    }
 
     const isTurnOn =
       /\b(on|chalu|jala|jalao|start|enable)\b/.test(query) || query.includes('on kar');
@@ -1073,7 +1071,7 @@ export class CommandRouter {
     // 5. ADVANCED IN-APP DEEP ACTIONS ACROSS USER'S APPS
     const isNativeBridge = this.hasNativeAndroidBridge();
 
-    // YouTube Search / Play / Shorts
+    // YouTube Search / Play / Shorts (never opens fake browser tab on Android)
     if (
       query.includes('youtube') &&
       (query.includes('search') ||
@@ -1085,14 +1083,24 @@ export class CommandRouter {
         query.includes('video') ||
         query.includes('shorts'))
     ) {
+      if (!androidBridge.isAppControlAllowed('com.google.android.youtube')) {
+        return {
+          handled: true,
+          actionType: 'permission_denied',
+          reply: 'YouTube control aapne App Control permissions me disabled kiya hua hai.',
+        };
+      }
       if (query.includes('shorts')) {
         const shortsWeb = 'https://www.youtube.com/shorts';
-        this.triggerAndroidBridge('open_url', shortsWeb);
+        const bridgeRes = isNativeBridge ? this.runBridgeCommand('youtube_search', 'shorts') : null;
+        if (bridgeRes?.status === 'not_installed') {
+          return { handled: true, actionType: 'app_not_installed', reply: bridgeRes.message };
+        }
         return {
           handled: true,
           reply: 'YouTube Shorts app me open kar rahi hoon!',
           actionType: 'youtube_shorts',
-          externalUrl: isNativeBridge
+          externalUrl: bridgeRes?.ok
             ? undefined
             : this.buildDeepIntentUrl(shortsWeb, 'com.google.android.youtube'),
           externalLabel: 'Open YouTube Shorts',
@@ -1101,19 +1109,64 @@ export class CommandRouter {
       const targetQuery =
         this.extractQueryAfterKeywords(
           query,
-          /\b(youtube|par|me|mein|search|play|chalao|dhundho|song|songs|gaane|gana|karo|open|kholo)\b/gi
+          /\b(youtube|par|me|mein|on|in|for|search|play|chalao|dhundho|song|songs|gaane|gana|karo|open|kholo)\b/gi
         ) || 'trending songs';
       const ytWeb = `https://www.youtube.com/results?search_query=${encodeURIComponent(targetQuery)}`;
-      const bridged = this.triggerAndroidBridge('youtube_play', targetQuery);
+      const bridgeRes = isNativeBridge ? this.runBridgeCommand('youtube_search', targetQuery) : null;
+      if (bridgeRes?.status === 'not_installed') {
+        return { handled: true, actionType: 'app_not_installed', reply: bridgeRes.message };
+      }
+      if (bridgeRes?.status === 'permission_denied') {
+        return { handled: true, actionType: 'permission_denied', reply: bridgeRes.message };
+      }
       return {
         handled: true,
-        reply: `YouTube app me "${targetQuery}" search karke play kar rahi hoon!`,
+        reply: `YouTube app me "${targetQuery}" search kar rahi hoon!`,
         actionType: 'youtube_play',
-        externalUrl: bridged
+        externalUrl: bridgeRes?.ok
           ? undefined
           : this.buildDeepIntentUrl(ytWeb, 'com.google.android.youtube'),
         externalLabel: 'Open in YouTube App',
       };
+    }
+
+    // Chrome: Open requested website explicitly in Chrome
+    if (
+      query.includes('chrome') &&
+      (query.includes('http') ||
+        /\b[a-z0-9-]+\.(com|org|in|net|io|co|gov|edu)\b/i.test(query) ||
+        query.includes('website'))
+    ) {
+      if (!androidBridge.isAppControlAllowed('com.android.chrome')) {
+        return {
+          handled: true,
+          actionType: 'permission_denied',
+          reply: 'Chrome control aapne App Control permissions me disabled kiya hua hai.',
+        };
+      }
+      const urlMatch = query.match(/(https?:\/\/[^\s]+|[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:\/[^\s]*)?)/);
+      if (urlMatch) {
+        const rawUrl = urlMatch[1];
+        const finalUrl = /^https?:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
+        const bridgeRes = isNativeBridge ? this.runBridgeCommand('chrome_open_url', finalUrl) : null;
+        if (bridgeRes?.status === 'not_installed') {
+          return { handled: true, actionType: 'app_not_installed', reply: bridgeRes.message };
+        }
+        if (bridgeRes?.status === 'permission_denied') {
+          return { handled: true, actionType: 'permission_denied', reply: bridgeRes.message };
+        }
+        return {
+          handled: true,
+          reply: `Chrome app me ${finalUrl} open kar rahi hoon!`,
+          actionType: 'chrome_open_url',
+          externalUrl: bridgeRes?.ok
+            ? undefined
+            : this.isAndroidDevice()
+            ? this.buildDeepIntentUrl(finalUrl, 'com.android.chrome')
+            : finalUrl,
+          externalLabel: `Open ${finalUrl} in Chrome`,
+        };
+      }
     }
 
     // Pinterest Search
@@ -1193,18 +1246,31 @@ export class CommandRouter {
         query.includes('le chalo') ||
         query.includes('dikhao'))
     ) {
+      if (!androidBridge.isAppControlAllowed('com.google.android.apps.maps')) {
+        return {
+          handled: true,
+          actionType: 'permission_denied',
+          reply: 'Google Maps control aapne App Control permissions me disabled kiya hua hai.',
+        };
+      }
       const place =
         this.extractQueryAfterKeywords(
           query,
           /\b(google|map|maps|par|me|ka|ke|liye|rasta|dhundho|search|navigate|dikhao|le chalo|jaana hai|karo)\b/gi
         ) || 'nearby petrol pump';
       const mapsWeb = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(place)}`;
-      const bridged = this.triggerAndroidBridge('maps_navigate', place);
+      const bridgeRes = isNativeBridge ? this.runBridgeCommand('maps_navigate', place) : null;
+      if (bridgeRes?.status === 'not_installed') {
+        return { handled: true, actionType: 'app_not_installed', reply: bridgeRes.message };
+      }
+      if (bridgeRes?.status === 'permission_denied') {
+        return { handled: true, actionType: 'permission_denied', reply: bridgeRes.message };
+      }
       return {
         handled: true,
         reply: `Google Maps app me "${place}" ke liye navigation khol rahi hoon!`,
         actionType: 'maps_navigate',
-        externalUrl: bridged
+        externalUrl: bridgeRes?.ok
           ? undefined
           : this.buildDeepIntentUrl(
               mapsWeb,
@@ -1281,30 +1347,79 @@ export class CommandRouter {
       }
     }
 
-    // WhatsApp Send Message
+    // WhatsApp Send Message (Feature 4: requires user confirmation before sensitive send action!)
     if (
       query.includes('whatsapp') &&
-      (query.includes('message') || query.includes('send') || query.includes('bhejo') || query.includes('likho'))
+      (query.includes('message') || query.includes('send') || query.includes('bhejo') || query.includes('likho') || query.includes('share'))
     ) {
+      if (!androidBridge.isAppControlAllowed('com.whatsapp')) {
+        return {
+          handled: true,
+          actionType: 'permission_denied',
+          reply: 'WhatsApp control aapne App Control permissions me disabled kiya hua hai.',
+        };
+      }
       const msgBody =
         this.extractQueryAfterKeywords(
           query,
-          /\b(whatsapp|par|me|ko|message|send|bhejo|likho|karo)\b/gi
+          /\b(whatsapp|par|me|on|in|ko|message|send|bhejo|likho|share|karo)\b/gi
         ) || 'Hello!';
       const waWeb = `https://api.whatsapp.com/send?text=${encodeURIComponent(msgBody)}`;
-      const bridged = this.triggerAndroidBridge('whatsapp_send', msgBody);
+      const deepWaUrl = this.isAndroidDevice()
+        ? this.buildDeepIntentUrl(waWeb, 'com.whatsapp', `whatsapp://send?text=${encodeURIComponent(msgBody)}`)
+        : waWeb;
       return {
         handled: true,
-        reply: `WhatsApp app me "${msgBody}" bhejne ke liye khol rahi hoon!`,
+        reply: `Kya aap WhatsApp par "${msgBody}" message prepare/send karna chahte hain? Kripya confirm karein.`,
         actionType: 'whatsapp_send',
-        externalUrl: bridged
-          ? undefined
-          : this.buildDeepIntentUrl(
-              waWeb,
-              'com.whatsapp',
-              `whatsapp://send?text=${encodeURIComponent(msgBody)}`
-            ),
+        requiresConfirmation: true,
+        confirmationDetails: {
+          action: 'Send WhatsApp Message',
+          target: msgBody,
+          onConfirm: () => {
+            if (isNativeBridge) {
+              this.runBridgeCommand('whatsapp_send', msgBody);
+            } else if (typeof window !== 'undefined') {
+              window.location.href = deepWaUrl;
+            }
+          },
+        },
         externalLabel: 'Send in WhatsApp App',
+      };
+    }
+
+    // Gmail Compose / Send Email (Feature 3 & 4: requires explicit user confirmation!)
+    if (
+      (query.includes('gmail') || query.includes('email') || query.includes('mail')) &&
+      (query.includes('send') || query.includes('compose') || query.includes('bhejo') || query.includes('likho'))
+    ) {
+      if (!androidBridge.isAppControlAllowed('com.google.android.gm')) {
+        return {
+          handled: true,
+          actionType: 'permission_denied',
+          reply: 'Gmail control aapne App Control permissions me disabled kiya hua hai.',
+        };
+      }
+      const emailMatch = query.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+      const recipient = emailMatch ? emailMatch[0] : '';
+      const mailtoUrl = `mailto:${encodeURIComponent(recipient)}`;
+      return {
+        handled: true,
+        reply: `Kya aap Gmail me ${recipient || 'new email'} compose karna chahte hain? Kripya confirm karein.`,
+        actionType: 'gmail_compose',
+        requiresConfirmation: true,
+        confirmationDetails: {
+          action: 'Compose Email in Gmail',
+          target: recipient || 'New Email Draft',
+          onConfirm: () => {
+            if (isNativeBridge) {
+              this.runBridgeCommand('gmail_compose', recipient);
+            } else if (typeof window !== 'undefined') {
+              window.location.href = mailtoUrl;
+            }
+          },
+        },
+        externalLabel: 'Compose in Gmail App',
       };
     }
 
@@ -1424,8 +1539,49 @@ export class CommandRouter {
       }
     }
 
-    // 6. ACCESSIBILITY IN-APP AUTOMATIONS (Scroll, Click, Type, Screenshot, Navigation)
+    // 6. ACCESSIBILITY IN-APP AUTOMATIONS (Requires explicit user consent before executing!)
     const isAndroid = this.isAndroidDevice();
+    const asksAccessibilityAction =
+      query.includes('scroll down') ||
+      query.includes('niche scroll') ||
+      query.includes('niche jao') ||
+      query.includes('scroll up') ||
+      query.includes('upar scroll') ||
+      query.includes('upar jao') ||
+      query.startsWith('click ') ||
+      query.startsWith('dabao ') ||
+      query.includes('par click karo') ||
+      query.startsWith('type ') ||
+      query.startsWith('likho ') ||
+      query.includes('screenshot') ||
+      query.includes('screen capture') ||
+      query === 'go home' ||
+      query === 'home screen' ||
+      query === 'ghar jao' ||
+      query === 'open home' ||
+      query === 'go back' ||
+      query === 'back' ||
+      query === 'piche jao' ||
+      query.includes('recent apps') ||
+      query === 'recents';
+
+    if (asksAccessibilityAction && (isAndroid || isNativeBridge) && !androidBridge.hasAccessibilityUserConsent()) {
+      return {
+        handled: true,
+        actionType: 'accessibility_consent_required',
+        reply:
+          'Accessibility Permission Required: Phone screen par click, scroll ya navigation chalane se pehle explicit user permission zaroori hai.',
+        requiresConfirmation: true,
+        confirmationDetails: {
+          action: 'Enable JARVIS Accessibility Assistance',
+          target: 'JarvisAccessibilityService (UI Scroll, Click, Navigation)',
+          onConfirm: () => {
+            androidBridge.setAccessibilityUserConsent(true);
+          },
+        },
+      };
+    }
+
     if (query.includes('scroll down') || query.includes('niche scroll') || query.includes('niche jao')) {
       const bridged = this.triggerAndroidBridge('scroll_down');
       return {
@@ -1604,7 +1760,7 @@ export class CommandRouter {
       };
     }
 
-    // 9. DIRECT CALLS & SMS / MESSAGES (Executes immediately without extra confirmation popup)
+    // 9. SENSITIVE CALLS, SMS & PAYMENTS (Explicit User Confirmation Required per Feature 4)
     if (
       query.startsWith('call ') ||
       query.startsWith('phone lagao ') ||
@@ -1619,13 +1775,23 @@ export class CommandRouter {
         .trim();
       const digitsOnly = target.replace(/[^\d+]/g, '');
       const dialTarget = digitsOnly || target;
-      const bridged = this.triggerAndroidBridge('call', dialTarget);
-      const telUrl = bridged ? undefined : `tel:${encodeURIComponent(dialTarget)}`;
+      const telUrl = `tel:${encodeURIComponent(dialTarget)}`;
       return {
         handled: true,
-        reply: `${target} ko direct call laga rahi hoon!`,
+        reply: `Kya aap ${target} ko call karna chahte hain? Kripya confirm karein.`,
         actionType: 'direct_call',
-        externalUrl: telUrl,
+        requiresConfirmation: true,
+        confirmationDetails: {
+          action: 'Open Phone Dialer / Call',
+          target,
+          onConfirm: () => {
+            if (isNativeBridge) {
+              this.runBridgeCommand('call', dialTarget);
+            } else if (typeof window !== 'undefined') {
+              window.location.href = telUrl;
+            }
+          },
+        },
         externalLabel: `Call ${target}`,
       };
     }
@@ -1641,23 +1807,61 @@ export class CommandRouter {
         .replace(/^(sms|message bhejo|send sms)\s+/i, '')
         .replace(/\s*ko (message bhejo|sms bhejo)$/i, '')
         .trim();
-      const bridged = this.triggerAndroidBridge('sms', target);
       const digitsOnly = target.replace(/[^\d+]/g, '');
-      const smsUrl = bridged
-        ? undefined
-        : digitsOnly
+      const smsUrl = digitsOnly
         ? `sms:${encodeURIComponent(digitsOnly)}`
         : `sms:?body=${encodeURIComponent(target)}`;
       return {
         handled: true,
-        reply: `${target} ko direct SMS open kar rahi hoon!`,
+        reply: `Kya aap ${target} ko SMS message prepare karna chahte hain? Kripya confirm karein.`,
         actionType: 'direct_sms',
-        externalUrl: smsUrl,
+        requiresConfirmation: true,
+        confirmationDetails: {
+          action: 'Prepare SMS Message',
+          target,
+          onConfirm: () => {
+            if (isNativeBridge) {
+              this.runBridgeCommand('sms', target);
+            } else if (typeof window !== 'undefined') {
+              window.location.href = smsUrl;
+            }
+          },
+        },
         externalLabel: `Message ${target}`,
       };
     }
 
-    // 10. UNIVERSAL PHONE APP LAUNCHER (Custom apps + all 34+ built-in apps + Android intent://)
+    // UPI Payment / Purchase guardrail (always requires confirmation)
+    if (
+      /\b(pay|payment|paise bhejo|transfer|buy|purchase)\b/.test(query) &&
+      (query.includes('phonepe') || query.includes('gpay') || query.includes('google pay') || query.includes('paytm') || query.includes('upi') || /\d+/.test(query))
+    ) {
+      const pkg = query.includes('paytm')
+        ? 'net.one97.paytm'
+        : query.includes('gpay') || query.includes('google pay')
+        ? 'com.google.android.apps.nbu.paisa.user'
+        : 'com.phonepe.app';
+      const payLabel = query.includes('paytm') ? 'Paytm' : query.includes('gpay') || query.includes('google pay') ? 'Google Pay' : 'PhonePe';
+      return {
+        handled: true,
+        reply: `Security Confirmation: Kya aap ${payLabel} payment screen kholna chahte hain? JARVIS bina confirmation ke koi payment nahi karti.`,
+        actionType: 'upi_confirmation',
+        requiresConfirmation: true,
+        confirmationDetails: {
+          action: `Open ${payLabel} Payment`,
+          target: query,
+          onConfirm: () => {
+            if (isNativeBridge) {
+              this.runBridgeCommand('open_app', pkg);
+            } else if (this.isAndroidDevice() && typeof window !== 'undefined') {
+              window.location.href = `intent:#Intent;action=android.intent.action.MAIN;category=android.intent.category.LAUNCHER;package=${pkg};end`;
+            }
+          },
+        },
+      };
+    }
+
+    // 10. UNIVERSAL PHONE APP LAUNCHER (Checks real bridge installation + user permissions, never fake browser tabs!)
     const isLaunchIntent =
       /\b(open|kholo|kholiye|khole|launch|start|khol|dikhao|dikhaiye|chalu|chalao|chalaiye|lagao|nikalo|bajao)\b/.test(query) ||
       query.includes('chalu karo') ||
@@ -1691,8 +1895,21 @@ export class CommandRouter {
         for (const cApp of customApps) {
           const cLower = (cApp.name || '').toLowerCase();
           if (cLower && (query === cLower || (isLaunchIntent && query.includes(cLower)))) {
-            const bridged = this.triggerAndroidBridge('open_app', cApp.packageName || cApp.name);
-            const launchUrl = bridged ? undefined : this.buildAppLaunchUrl(cApp);
+            if (cApp.packageName && !androidBridge.isAppControlAllowed(cApp.packageName)) {
+              return {
+                handled: true,
+                actionType: 'permission_denied',
+                reply: `${cApp.name} control aapne App Permissions me disable kiya hua hai.`,
+              };
+            }
+            if (isNativeBridge) {
+              const res = this.runBridgeCommand('open_app', cApp.packageName || cApp.name);
+              if (res.status === 'not_installed') {
+                return { handled: true, actionType: 'app_not_installed', reply: `${cApp.name} aapke phone me installed nahi hai.` };
+              }
+              return { handled: true, reply: res.message || `${cApp.name} open kar rahi hoon!`, actionType: `open_custom_${cLower}` };
+            }
+            const launchUrl = this.buildAppLaunchUrl(cApp);
             return {
               handled: true,
               reply: `${cApp.name} app phone me open kar rahi hoon!`,
@@ -1714,13 +1931,43 @@ export class CommandRouter {
           (isLaunchIntent && query.includes(alias))
       );
       if (matchedAlias) {
-        const bridged = this.triggerAndroidBridge('open_app', app.packageName);
-        const launchUrl = bridged ? undefined : this.buildAppLaunchUrl(app);
+        if (!androidBridge.isAppControlAllowed(app.packageName)) {
+          return {
+            handled: true,
+            actionType: 'permission_denied',
+            reply: `${app.name} control aapne Apps Hub Permissions me band kiya hua hai. Pehle permission enable karein.`,
+          };
+        }
+
+        if (isNativeBridge) {
+          const res = this.runBridgeCommand('open_app', app.packageName);
+          if (res.status === 'not_installed') {
+            return {
+              handled: true,
+              actionType: 'app_not_installed',
+              reply: `${app.name} (${app.packageName}) aapke phone me installed nahi hai.`,
+            };
+          }
+          if (res.status === 'permission_denied') {
+            return {
+              handled: true,
+              actionType: 'permission_denied',
+              reply: res.message,
+            };
+          }
+          return {
+            handled: true,
+            reply: app.replyMsg,
+            actionType: `open_${app.key}`,
+          };
+        }
+
+        const launchUrl = this.buildAppLaunchUrl(app);
 
         // On Android phones NEVER open JARVIS's own built-in clone modals/settings;
         // launch the real phone app instead. Keep web modals only for Desktop browsers.
         let uiAction: CommandUiAction | undefined;
-        if (!bridged && !this.isAndroidDevice()) {
+        if (!this.isAndroidDevice()) {
           if (app.key === 'calculator') {
             uiAction = { modal: 'calculator' };
           } else if (app.key === 'camera') {
@@ -1738,7 +1985,9 @@ export class CommandRouter {
 
         return {
           handled: true,
-          reply: app.replyMsg,
+          reply: launchUrl
+            ? app.replyMsg
+            : `${app.name} direct browser me available nahi hai — Android phone par real app kholne ke liye JARVIS Android Companion use karein.`,
           actionType: `open_${app.key}`,
           externalUrl: launchUrl,
           externalLabel: launchUrl ? `Open ${app.name} on Phone` : undefined,
@@ -1747,25 +1996,44 @@ export class CommandRouter {
       }
     }
 
-    // Generic fallback for any other app named by the user with "open/kholo"
+    // Generic fallback for any other app named by the user with "open/kholo":
+    // Checks real native PackageManager if bridged; NEVER opens a fake browser search tab!
     if (isLaunchIntent) {
       const appNameRaw = query
-        .replace(/\b(open|kholo|launch|start|chalu|khol|dikhao|karo|do|app)\b/gi, ' ')
+        .replace(/\b(open|kholo|launch|start|chalu|khol|dikhao|karo|do|app|please|jarvis)\b/gi, ' ')
         .replace(/\s+/g, ' ')
         .trim();
 
       if (appNameRaw) {
-        const bridged = this.triggerAndroidBridge('open_app_name', appNameRaw);
+        if (isNativeBridge) {
+          const res = this.runBridgeCommand('open_app_name', appNameRaw);
+          if (res.status === 'not_installed') {
+            return {
+              handled: true,
+              actionType: 'app_not_installed',
+              reply: `"${appNameRaw}" aapke phone me installed nahi mila. Kripya app ka sahi naam check karein.`,
+            };
+          }
+          if (res.status === 'permission_denied') {
+            return {
+              handled: true,
+              actionType: 'permission_denied',
+              reply: res.message,
+            };
+          }
+          if (res.ok) {
+            return {
+              handled: true,
+              reply: res.message || `${appNameRaw} phone me open kar diya hai!`,
+              actionType: 'open_generic_app',
+            };
+          }
+        }
+
         return {
           handled: true,
-          reply: `Aapke phone me ${appNameRaw} app open kar rahi hoon!`,
-          actionType: 'open_generic_app',
-          externalUrl: bridged
-            ? undefined
-            : this.isAndroidDevice()
-            ? `market://search?q=${encodeURIComponent(appNameRaw)}&c=apps`
-            : `https://www.google.com/search?q=${encodeURIComponent(appNameRaw + ' app')}`,
-          externalLabel: `Open ${appNameRaw} on Phone`,
+          actionType: 'app_not_installed',
+          reply: `"${appNameRaw}" is browser me installed nahi hai ya verify nahi ho sakta. Real phone apps discover aur launch karne ke liye Settings → 04 APK Download se Native Android Companion install karein.`,
         };
       }
     }
